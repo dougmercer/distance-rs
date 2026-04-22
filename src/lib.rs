@@ -14,6 +14,7 @@ const TRIAL: u8 = 1;
 const ACCEPTED: u8 = 2;
 const MIN_COST: f64 = 1.0e-12;
 const EPS: f64 = 1.0e-12;
+const GRID_EPS: f64 = 1.0e-9;
 const PARALLEL_UPDATE_MIN_STENCIL: usize = 16;
 const PARALLEL_BLOCKED_FLAT_UPDATE_MIN_STENCIL: usize = 128;
 const PARALLEL_FLAT_UPDATE_MIN_STENCIL: usize = 256;
@@ -927,29 +928,93 @@ impl Solver {
         if self.segment_bounds_clear(row0, col0, row1, col1) {
             return true;
         }
-        let d_row = row1 as f64 - row0;
-        let d_col = col1 as f64 - col0;
-        let steps = ((d_row.abs().max(d_col.abs())) * 2.0).ceil().max(1.0) as usize;
+        self.segment_grid_clear(row0, col0, row1 as f64, col1 as f64)
+    }
 
-        for step in 0..=steps {
-            let t = step as f64 / steps as f64;
-            let row = row0 + t * d_row;
-            let col = col0 + t * d_col;
-            let nearest_row = row.round() as isize;
-            let nearest_col = col.round() as isize;
-            if nearest_row < 0
-                || nearest_col < 0
-                || nearest_row >= self.rows as isize
-                || nearest_col >= self.cols as isize
-            {
-                return false;
-            }
-            let sample = self.idx(nearest_row as usize, nearest_col as usize);
-            if !self.valid[sample] {
+    fn segment_grid_clear(&self, row0: f64, col0: f64, row1: f64, col1: f64) -> bool {
+        if !row0.is_finite() || !col0.is_finite() || !row1.is_finite() || !col1.is_finite() {
+            return false;
+        }
+
+        let x0 = col0 + 0.5;
+        let y0 = row0 + 0.5;
+        let x1 = col1 + 0.5;
+        let y1 = row1 + 0.5;
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let mut crossings = Vec::new();
+
+        Self::push_axis_crossings(&mut crossings, x0, dx);
+        Self::push_axis_crossings(&mut crossings, y0, dy);
+        crossings.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        crossings.dedup_by(|a, b| (*a - *b).abs() <= GRID_EPS);
+
+        if !self.segment_point_clear(x0, y0) || !self.segment_point_clear(x1, y1) {
+            return false;
+        }
+        for &t in &crossings {
+            if !self.segment_point_clear(x0 + dx * t, y0 + dy * t) {
                 return false;
             }
         }
+
+        let mut previous = 0.0;
+        for next in crossings.into_iter().chain(std::iter::once(1.0)) {
+            if next - previous > GRID_EPS {
+                let midpoint = 0.5 * (previous + next);
+                if !self.segment_cell_clear(x0 + dx * midpoint, y0 + dy * midpoint) {
+                    return false;
+                }
+            }
+            previous = next;
+        }
         true
+    }
+
+    fn push_axis_crossings(crossings: &mut Vec<f64>, start: f64, delta: f64) {
+        if delta.abs() <= EPS {
+            return;
+        }
+
+        let end = start + delta;
+        let min_boundary = start.min(end).floor() as isize + 1;
+        let max_boundary = start.max(end).floor() as isize;
+        for boundary in min_boundary..=max_boundary {
+            let t = (boundary as f64 - start) / delta;
+            if t > GRID_EPS && t < 1.0 - GRID_EPS {
+                crossings.push(t);
+            }
+        }
+    }
+
+    fn segment_point_clear(&self, x: f64, y: f64) -> bool {
+        let col_a = x.floor() as isize;
+        let col_b = (x - GRID_EPS).floor() as isize;
+        let row_a = y.floor() as isize;
+        let row_b = (y - GRID_EPS).floor() as isize;
+        let mut touched_any_cell = false;
+
+        for row in [row_a, row_b] {
+            for col in [col_a, col_b] {
+                if row < 0 || col < 0 || row >= self.rows as isize || col >= self.cols as isize {
+                    continue;
+                }
+                touched_any_cell = true;
+                if !self.valid[self.idx(row as usize, col as usize)] {
+                    return false;
+                }
+            }
+        }
+        touched_any_cell
+    }
+
+    fn segment_cell_clear(&self, x: f64, y: f64) -> bool {
+        let row = y.floor() as isize;
+        let col = x.floor() as isize;
+        if row < 0 || col < 0 || row >= self.rows as isize || col >= self.cols as isize {
+            return false;
+        }
+        self.valid[self.idx(row as usize, col as usize)]
     }
 
     fn segment_bounds_clear(&self, row0: f64, col0: f64, row1: usize, col1: usize) -> bool {
@@ -1159,9 +1224,27 @@ fn distance_accumulation<'py>(
     if rows == 0 || cols == 0 {
         return Err(PyValueError::new_err("input rasters must not be empty"));
     }
-    if cell_size_x <= 0.0 || cell_size_y <= 0.0 || search_radius <= 0.0 {
+    if cell_size_x <= 0.0
+        || cell_size_y <= 0.0
+        || search_radius <= 0.0
+        || !cell_size_x.is_finite()
+        || !cell_size_y.is_finite()
+        || !search_radius.is_finite()
+    {
         return Err(PyValueError::new_err(
-            "cell sizes and search radius must be positive",
+            "cell sizes and search radius must be positive finite values",
+        ));
+    }
+    if !zero_factor.is_finite()
+        || !low_cut_angle.is_finite()
+        || !high_cut_angle.is_finite()
+        || !slope.is_finite()
+        || !power.is_finite()
+        || !cos_power.is_finite()
+        || !sec_power.is_finite()
+    {
+        return Err(PyValueError::new_err(
+            "vertical factor parameters must be finite",
         ));
     }
     if low_cut_angle >= high_cut_angle {
@@ -1416,6 +1499,19 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
 
+    fn flat_vf() -> VerticalFactor {
+        VerticalFactor {
+            kind: VerticalFactorKind::None,
+            zero_factor: 1.0,
+            low_cut_angle: -90.0,
+            high_cut_angle: 90.0,
+            slope: 0.0,
+            power: 1.0,
+            cos_power: 1.0,
+            sec_power: 1.0,
+        }
+    }
+
     #[test]
     fn hiking_pace_matches_esri_table_at_zero_degrees() {
         assert_abs_diff_eq!(hiking_pace(0.0), 0.000198541, epsilon = 1.0e-7);
@@ -1437,5 +1533,31 @@ mod tests {
         assert_eq!(vf.factor(0.0), 2.0);
         assert!(vf.factor(30.0).is_infinite());
         assert!(vf.factor(-30.0).is_infinite());
+    }
+
+    #[test]
+    fn barrier_segment_check_rejects_corner_touching_blocked_cell() {
+        let mut valid = vec![true; 9];
+        valid[1] = false;
+        let solver = Solver::new(
+            SolverInput {
+                rows: 3,
+                cols: 3,
+                cost: vec![1.0; 9],
+                elevation: Vec::new(),
+                valid,
+                has_blocked_cells: true,
+            },
+            SolverOptions {
+                has_elevation: false,
+                use_surface_distance: true,
+                vf: flat_vf(),
+                cell_size_x: 1.0,
+                cell_size_y: 1.0,
+                search_radius: 4.0,
+            },
+        );
+
+        assert!(!solver.segment_clear_coord_to_index(0.0, 0.0, solver.idx(2, 2)));
     }
 }

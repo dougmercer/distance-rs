@@ -134,7 +134,7 @@ def test_prepare_geo_inputs_reprojects_gpkg_waypoints(tmp_path: Path) -> None:
     assert math.isclose(geo.waypoint_xy[1][1], 5.0, abs_tol=1.0e-8)
 
 
-def test_prepare_geo_inputs_crops_to_waypoint_search_radius(tmp_path: Path) -> None:
+def test_prepare_geo_inputs_crops_to_buffer_and_forwards_stencil_radius(tmp_path: Path) -> None:
     land_use_path = tmp_path / "large_land_use.tif"
     transform = from_origin(0.0, 1000.0, 10.0, 10.0)
     land_use = np.arange(100 * 100, dtype=np.float32).reshape((100, 100))
@@ -143,7 +143,8 @@ def test_prepare_geo_inputs_crops_to_waypoint_search_radius(tmp_path: Path) -> N
     geo = prepare_geo_inputs(
         land_use_path,
         waypoints=LineString([(105.0, 895.0), (305.0, 795.0)]),
-        search_radius=25.0,
+        crop_buffer=25.0,
+        stencil_radius=40.0,
     )
 
     assert geo.land_use.shape == (15, 25)
@@ -155,10 +156,12 @@ def test_prepare_geo_inputs_crops_to_waypoint_search_radius(tmp_path: Path) -> N
     assert geo.destination_cell == (12, 22)
     assert geo.land_use[0, 0] == land_use[8, 8]
     assert geo.land_use[-1, -1] == land_use[22, 32]
-    assert geo.distance_kwargs()["search_radius"] == 25.0
+    assert geo.crop_buffer == 25.0
+    assert geo.stencil_radius == 40.0
+    assert geo.distance_kwargs()["search_radius"] == 40.0
 
 
-def test_prepare_geo_inputs_rejects_invalid_search_radius(tmp_path: Path) -> None:
+def test_prepare_geo_inputs_rejects_invalid_radii(tmp_path: Path) -> None:
     land_use_path = tmp_path / "land_use.tif"
     _write_geotiff(
         land_use_path,
@@ -167,12 +170,32 @@ def test_prepare_geo_inputs_rejects_invalid_search_radius(tmp_path: Path) -> Non
         crs="EPSG:3857",
     )
 
-    with pytest.raises(ValueError, match="search_radius"):
+    with pytest.raises(ValueError, match="crop_buffer"):
         prepare_geo_inputs(
             land_use_path,
             waypoints=LineString([(5.0, 35.0), (35.0, 5.0)]),
-            search_radius=0.0,
+            crop_buffer=0.0,
         )
+
+    with pytest.raises(ValueError, match="stencil_radius"):
+        prepare_geo_inputs(
+            land_use_path,
+            waypoints=LineString([(5.0, 35.0), (35.0, 5.0)]),
+            stencil_radius=math.nan,
+        )
+
+
+def test_prepare_geo_inputs_requires_crs_for_plain_coordinate_waypoints(tmp_path: Path) -> None:
+    land_use_path = tmp_path / "land_use.tif"
+    _write_geotiff(
+        land_use_path,
+        np.ones((4, 4), dtype=np.float32),
+        transform=from_origin(0.0, 40.0, 10.0, 10.0),
+        crs="EPSG:3857",
+    )
+
+    with pytest.raises(ValueError, match="waypoint_crs"):
+        prepare_geo_inputs(land_use_path, waypoints=[(5.0, 35.0), (35.0, 5.0)])
 
 
 def test_prepare_geo_inputs_rasterizes_vector_barriers(tmp_path: Path) -> None:
@@ -207,7 +230,8 @@ def test_geo_distance_accumulation_returns_map_path(tmp_path: Path) -> None:
     result = geo_distance_accumulation(
         land_use_path,
         waypoints=LineString([(5.0, 45.0), (45.0, 5.0)]),
-        search_radius=30.0,
+        crop_buffer=30.0,
+        stencil_radius=30.0,
     )
     line_xy = geo_optimal_path_as_line(result, reverse=True)
 
@@ -228,7 +252,8 @@ def test_compute_optimal_path_stitches_waypoint_legs_and_metrics(tmp_path: Path)
     route = compute_optimal_path(
         cost_path,
         [(5.0, 295.0), (145.0, 155.0), (245.0, 55.0)],
-        search_radius=40.0,
+        crop_buffer=40.0,
+        stencil_radius=40.0,
         baseline_speed=5.0,
         waypoint_crs="EPSG:3857",
     )

@@ -56,7 +56,8 @@ class GeoRasterData:
     crs: Any
     bounds: Bounds
     cell_size: tuple[float, float]
-    search_radius: float | None = None
+    crop_buffer: float | None = None
+    stencil_radius: float | None = None
 
     @property
     def source_cell(self) -> Cell | None:
@@ -77,8 +78,8 @@ class GeoRasterData:
         }
         if self.elevation is not None:
             kwargs["elevation"] = self.elevation
-        if self.search_radius is not None:
-            kwargs["search_radius"] = self.search_radius
+        if self.stencil_radius is not None:
+            kwargs["search_radius"] = self.stencil_radius
         return kwargs
 
     def cell_to_xy(self, row: int, col: int, *, offset: str = "center") -> tuple[float, float]:
@@ -204,20 +205,22 @@ def prepare_geo_inputs(
     elevation_resampling: str | Any = "bilinear",
     nodata_is_barrier: bool = True,
     clear_waypoint_cells: bool = False,
-    search_radius: float | None = None,
+    crop_buffer: float | None = None,
+    stencil_radius: float | None = None,
 ) -> GeoRasterData:
     """Read GeoTIFF rasters and waypoint geometry onto one solver-ready grid.
 
     Parameters are intentionally GIS-facing; the returned arrays are plain
     NumPy rasters. If `land_use_costs` is provided, land-use class values are
     mapped to traversal costs. Otherwise the land-use raster values are treated
-    as costs directly. GeoJSON waypoints default to EPSG:4326 unless
-    `waypoint_crs` is supplied; plain coordinate sequences default to the target
-    raster CRS. When `search_radius` is provided with at least two waypoints,
-    only the target-grid cells inside the first/last waypoint bounding box
-    buffered by that radius are read and reprojected. `barriers` may be a
-    GeoJSON/GeoPackage path, GeoJSON-like mapping, Shapely geometry, or sequence
-    of geometries that will be rasterized onto the same cropped grid.
+    as costs directly. Plain coordinate waypoint sequences require
+    `waypoint_crs`; pass `EPSG:4326` for lon/lat input. When `crop_buffer` is
+    provided with at least two waypoints, only target-grid cells inside the
+    first/last waypoint bounding box buffered by that radius are read and
+    reprojected. `stencil_radius` controls the ordered-upwind solver stencil.
+    `barriers` may be a GeoJSON/GeoPackage path, GeoJSON-like mapping, Shapely
+    geometry, or sequence of geometries that will be rasterized onto the same
+    cropped grid.
     """
 
     with rasterio.open(land_use_path) as land_src:
@@ -227,10 +230,13 @@ def prepare_geo_inputs(
         target = rasterio.crs.CRS.from_user_input(target_input)
 
         cell_size = _target_resolution(land_src, resolution)
+        crop_buffer_value = _normalize_optional_radius(crop_buffer, "crop_buffer")
+        stencil_radius_value = _normalize_optional_radius(stencil_radius, "stencil_radius")
+        resolved_waypoint_crs = _compute_waypoint_crs(waypoints, waypoint_crs)
         waypoint_xy = _load_waypoint_xy(
             waypoints,
             target_crs=target,
-            waypoint_crs=waypoint_crs,
+            waypoint_crs=resolved_waypoint_crs,
             waypoint_layer=waypoint_layer,
         )
         target_bounds = _target_bounds(
@@ -240,9 +246,8 @@ def prepare_geo_inputs(
             bounds=bounds,
             bounds_crs=bounds_crs,
         )
-        search_radius_value = _normalize_search_radius(search_radius)
         transform, width, height, adjusted_bounds = _target_grid(target_bounds, cell_size)
-        if search_radius_value is not None:
+        if crop_buffer_value is not None:
             transform, width, height, adjusted_bounds = _restrict_grid_to_waypoint_radius(
                 transform=transform,
                 width=width,
@@ -250,7 +255,7 @@ def prepare_geo_inputs(
                 cell_size=cell_size,
                 bounds=adjusted_bounds,
                 waypoint_xy=waypoint_xy,
-                search_radius=search_radius_value,
+                crop_buffer=crop_buffer_value,
             )
         land_use = _read_to_grid(
             land_src,
@@ -314,7 +319,8 @@ def prepare_geo_inputs(
         crs=target,
         bounds=adjusted_bounds,
         cell_size=cell_size,
-        search_radius=search_radius_value,
+        crop_buffer=crop_buffer_value,
+        stencil_radius=stencil_radius_value,
     )
 
 
@@ -341,7 +347,8 @@ def geo_distance_accumulation(
     nodata_is_barrier: bool = True,
     clear_waypoint_cells: bool = False,
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
-    search_radius: float | None = None,
+    crop_buffer: float | None = None,
+    stencil_radius: float | None = None,
     use_surface_distance: bool = True,
 ) -> GeoDistanceAccumulationResult:
     """Run distance accumulation from geospatial raster/vector inputs."""
@@ -367,7 +374,8 @@ def geo_distance_accumulation(
         elevation_resampling=elevation_resampling,
         nodata_is_barrier=nodata_is_barrier,
         clear_waypoint_cells=clear_waypoint_cells,
-        search_radius=search_radius,
+        crop_buffer=crop_buffer,
+        stencil_radius=stencil_radius,
     )
     accumulation = distance_accumulation(
         geo.sources,
@@ -410,7 +418,8 @@ def compute_optimal_path(
     barriers: Any | None = None,
     elevation: str | Path | None = None,
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
-    search_radius: float | None = None,
+    crop_buffer: float | None = None,
+    stencil_radius: float | None = None,
     baseline_speed: float = 5.0,
     compute_metrics: bool = True,
     *,
@@ -429,9 +438,9 @@ def compute_optimal_path(
 ) -> OptimalPathResult:
     """Compute and stitch optimal route legs through consecutive waypoints.
 
-    Plain coordinate lists default to lon/lat (`EPSG:4326`) unless
-    `waypoint_crs` is supplied. Shapely geometries and vector files use their
-    own coordinates/CRS unless a CRS override is provided.
+    Plain coordinate lists require `waypoint_crs`; pass `EPSG:4326` for lon/lat
+    input. Shapely geometries and vector files use their own coordinates/CRS
+    unless a CRS override is provided.
     """
 
     baseline_speed_value = float(baseline_speed)
@@ -454,6 +463,8 @@ def compute_optimal_path(
     if len(waypoint_xy) < 2:
         raise ValueError("at least two waypoints are required")
 
+    crop_buffer_value = _normalize_optional_radius(crop_buffer, "crop_buffer")
+    stencil_radius_value = _normalize_optional_radius(stencil_radius, "stencil_radius")
     route_barrier_crs = _compute_barrier_crs(barriers, barrier_crs, route_waypoint_crs)
     vf = VerticalFactor.from_any(vertical_factor)
     legs: list[OptimalPathLeg] = []
@@ -477,7 +488,8 @@ def compute_optimal_path(
             barrier_all_touched=barrier_all_touched,
             clear_waypoint_cells=clear_waypoint_cells,
             vertical_factor=vf,
-            search_radius=search_radius,
+            crop_buffer=crop_buffer_value,
+            stencil_radius=stencil_radius_value,
             use_surface_distance=use_surface_distance,
         )
         if leg_result.source_cell is None or leg_result.destination_cell is None:
@@ -537,7 +549,10 @@ def _compute_waypoint_crs(waypoints: Any, waypoint_crs: Any | None) -> Any | Non
     if waypoint_crs is not None:
         return waypoint_crs
     if _is_plain_xy_sequence(waypoints):
-        return "EPSG:4326"
+        raise ValueError(
+            "plain coordinate waypoint sequences require waypoint_crs; "
+            "pass 'EPSG:4326' for lon/lat input"
+        )
     return None
 
 
@@ -773,12 +788,12 @@ def _target_grid(bounds: Bounds, cell_size: tuple[float, float]) -> tuple[Any, i
     return transform, width, height, adjusted_bounds
 
 
-def _normalize_search_radius(search_radius: float | None) -> float | None:
-    if search_radius is None:
+def _normalize_optional_radius(radius: float | None, name: str) -> float | None:
+    if radius is None:
         return None
-    value = float(search_radius)
+    value = float(radius)
     if value <= 0.0 or not math.isfinite(value):
-        raise ValueError("search_radius must be a positive finite value")
+        raise ValueError(f"{name} must be a positive finite value")
     return value
 
 
@@ -790,12 +805,12 @@ def _restrict_grid_to_waypoint_radius(
     cell_size: tuple[float, float],
     bounds: Bounds,
     waypoint_xy: Sequence[tuple[float, float]],
-    search_radius: float,
+    crop_buffer: float,
 ) -> tuple[Any, int, int, Bounds]:
     if len(waypoint_xy) < 2:
         return transform, width, height, bounds
 
-    left, bottom, right, top = _waypoint_search_bounds(waypoint_xy, search_radius)
+    left, bottom, right, top = _waypoint_search_bounds(waypoint_xy, crop_buffer)
     base_left, _, _, base_top = bounds
     x_res, y_res = cell_size
 
@@ -805,7 +820,7 @@ def _restrict_grid_to_waypoint_radius(
     row_stop = min(height, int(math.ceil((base_top - bottom) / y_res)))
 
     if row_start >= row_stop or col_start >= col_stop:
-        raise ValueError("waypoint search-radius bounds do not overlap the target raster grid")
+        raise ValueError("waypoint crop-buffer bounds do not overlap the target raster grid")
 
     cropped_left = base_left + col_start * x_res
     cropped_top = base_top - row_start * y_res
@@ -826,15 +841,15 @@ def _restrict_grid_to_waypoint_radius(
 
 
 def _waypoint_search_bounds(
-    waypoint_xy: Sequence[tuple[float, float]], search_radius: float
+    waypoint_xy: Sequence[tuple[float, float]], crop_buffer: float
 ) -> Bounds:
     start_x, start_y = waypoint_xy[0]
     end_x, end_y = waypoint_xy[-1]
     return (
-        min(start_x, end_x) - search_radius,
-        min(start_y, end_y) - search_radius,
-        max(start_x, end_x) + search_radius,
-        max(start_y, end_y) + search_radius,
+        min(start_x, end_x) - crop_buffer,
+        min(start_y, end_y) - crop_buffer,
+        max(start_x, end_x) + crop_buffer,
+        max(start_y, end_y) + crop_buffer,
     )
 
 

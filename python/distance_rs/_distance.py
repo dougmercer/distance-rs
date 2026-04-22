@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -197,7 +198,7 @@ class VerticalFactor:
 
     def _resolved_options(self, kind: str) -> dict[str, float]:
         defaults = _DEFAULTS[kind]
-        return {
+        options = {
             "zero_factor": defaults["zero_factor"]
             if self.zero_factor is None
             else float(self.zero_factor),
@@ -212,6 +213,12 @@ class VerticalFactor:
             "cos_power": defaults["cos_power"] if self.cos_power is None else float(self.cos_power),
             "sec_power": defaults["sec_power"] if self.sec_power is None else float(self.sec_power),
         }
+        for option_name, option_value in options.items():
+            if not math.isfinite(option_value):
+                raise ValueError(f"vertical factor option {option_name} must be finite")
+        if options["low_cut_angle"] >= options["high_cut_angle"]:
+            raise ValueError("low_cut_angle must be less than high_cut_angle")
+        return options
 
 
 @dataclass
@@ -289,10 +296,11 @@ def distance_accumulation(
         search_radius_value = 4.0 * max(cell_size_x, cell_size_y)
     else:
         search_radius_value = float(search_radius)
-    if search_radius_value <= 0.0:
-        raise ValueError("search_radius must be positive")
+    if search_radius_value <= 0.0 or not math.isfinite(search_radius_value):
+        raise ValueError("search_radius must be a positive finite value")
 
     vf = VerticalFactor.from_any(vertical_factor)
+    origin_x, origin_y = _normalize_origin(origin)
 
     raw = _native.distance_accumulation(
         source_arr,
@@ -321,7 +329,7 @@ def distance_accumulation(
         parent_b=raw["parent_b"],
         parent_weight=raw["parent_weight"],
         cell_size=(cell_size_x, cell_size_y),
-        origin=(float(origin[0]), float(origin[1])),
+        origin=(origin_x, origin_y),
         vertical_factor=vf,
         search_radius=search_radius_value,
     )
@@ -340,6 +348,7 @@ def optimal_path_as_line(
 
     if _is_one_destination(destination):
         row, col = destination  # type: ignore[misc]
+        max_steps_value = _normalize_max_steps(max_steps)
         return _native.optimal_path_as_line(
             result.distance,
             result.parent_a,
@@ -351,7 +360,7 @@ def optimal_path_as_line(
             result.cell_size[1],
             result.origin[0],
             result.origin[1],
-            0 if max_steps is None else int(max_steps),
+            max_steps_value,
         )
 
     return [
@@ -369,9 +378,32 @@ def _normalize_cell_size(cell_size: float | tuple[float, float]) -> tuple[float,
     else:
         x_size = float(cell_size)
         y_size = float(cell_size)
-    if x_size <= 0.0 or y_size <= 0.0:
-        raise ValueError("cell_size values must be positive")
+    if x_size <= 0.0 or y_size <= 0.0 or not math.isfinite(x_size) or not math.isfinite(y_size):
+        raise ValueError("cell_size values must be positive finite values")
     return x_size, y_size
+
+
+def _normalize_origin(origin: Sequence[float]) -> tuple[float, float]:
+    try:
+        origin_len = len(origin)
+    except TypeError as exc:
+        raise ValueError("origin must be an (x, y) pair") from exc
+    if origin_len != 2:
+        raise ValueError("origin must be an (x, y) pair")
+    origin_x = float(origin[0])
+    origin_y = float(origin[1])
+    if not math.isfinite(origin_x) or not math.isfinite(origin_y):
+        raise ValueError("origin values must be finite")
+    return origin_x, origin_y
+
+
+def _normalize_max_steps(max_steps: int | None) -> int:
+    if max_steps is None:
+        return 0
+    value = int(max_steps)
+    if value <= 0:
+        raise ValueError("max_steps must be positive")
+    return value
 
 
 def _is_one_destination(value: object) -> bool:

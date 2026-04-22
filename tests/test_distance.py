@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
 
 import numpy as np
+import pytest
 
 from distance_rs import VerticalFactor, distance_accumulation, optimal_path_as_line
 from distance_rs.baselines import raster_dijkstra, raster_dijkstra_baseline, trace_raster_path
+
+
+def test_package_import_does_not_load_geo_dependencies() -> None:
+    script = """
+import sys
+import distance_rs
+print('distance_rs._geo' in sys.modules)
+from distance_rs import *
+print('distance_rs._geo' in sys.modules)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.splitlines() == ["False", "False"]
 
 
 def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
@@ -45,6 +66,23 @@ def test_binary_vertical_factor_blocks_upslope() -> None:
 
     assert np.isfinite(result.distance[4, 3])
     assert math.isinf(result.distance[4, 8])
+
+
+def test_distance_accumulation_rejects_non_finite_numeric_options() -> None:
+    sources = np.zeros((3, 3), dtype=bool)
+    sources[1, 1] = True
+
+    with pytest.raises(ValueError, match="search_radius"):
+        distance_accumulation(sources, search_radius=math.nan)
+
+    with pytest.raises(ValueError, match="cell_size"):
+        distance_accumulation(sources, cell_size=math.nan)
+
+    with pytest.raises(ValueError, match="origin"):
+        distance_accumulation(sources, origin=(0.0, math.inf))
+
+    with pytest.raises(ValueError, match="vertical factor option"):
+        distance_accumulation(sources, vertical_factor={"type": "linear", "slope": math.nan})
 
 
 def test_optimal_path_as_line_reaches_source() -> None:

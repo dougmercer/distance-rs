@@ -10,17 +10,24 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Doug Mercer" }]
 dependencies = [
-    "fiona>=1.10",
     "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+geo = [
+    "fiona>=1.10",
     "rasterio>=1.4",
     "shapely>=2.0",
 ]
 
 [dependency-groups]
 dev = [
+    "fiona>=1.10",
     "maturin>=1.8,<2",
     "pytest>=8.0",
+    "rasterio>=1.4",
     "ruff>=0.11",
+    "shapely>=2.0",
 ]
 whitebox = [
     "whitebox>=2.3",

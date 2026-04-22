@@ -2,7 +2,7 @@
 
 The default rasters are 8000 x 8000 pixels at 1.5 meter resolution. The route
 only spans a few hundred meters, so `compute_optimal_path` should read/reproject
-only a small corridor around each leg when `search_radius` is set.
+only a small corridor around each leg when `crop_buffer` is set.
 """
 
 from __future__ import annotations
@@ -115,7 +115,8 @@ def main(argv: list[str] | None = None) -> None:
         barriers=barriers,
         elevation=elevation_path,
         vertical_factor=VERTICAL_FACTOR,
-        search_radius=args.search_radius,
+        crop_buffer=args.crop_buffer,
+        stencil_radius=args.stencil_radius,
         baseline_speed=args.baseline_speed,
         land_use_costs=LAND_USE_COSTS,
         waypoint_crs=CRS,
@@ -127,7 +128,7 @@ def main(argv: list[str] | None = None) -> None:
         elevation_path=elevation_path,
         waypoints=waypoints,
         barriers=barriers,
-        search_radius=args.search_radius,
+        crop_buffer=args.crop_buffer,
         baseline_speed=args.baseline_speed,
     )
 
@@ -154,7 +155,8 @@ def main(argv: list[str] | None = None) -> None:
         elevation_path=elevation_path,
         size=args.size,
         cell_size=args.cell_size,
-        search_radius=args.search_radius,
+        crop_buffer=args.crop_buffer,
+        stencil_radius=args.stencil_radius,
         baseline_speed=args.baseline_speed,
         plot_path=plot_path,
     )
@@ -194,10 +196,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Square cell size in meters. Defaults to sub-2-meter resolution.",
     )
     parser.add_argument(
-        "--search-radius",
+        "--crop-buffer",
         type=float,
         default=30.0,
-        help="Ordered-upwind search radius and GeoTIFF corridor buffer in meters.",
+        help="GeoTIFF corridor buffer around each route leg in meters.",
+    )
+    parser.add_argument(
+        "--stencil-radius",
+        type=float,
+        default=30.0,
+        help="Ordered-upwind solver stencil radius in meters.",
     )
     parser.add_argument(
         "--baseline-speed",
@@ -221,8 +229,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--size must be positive")
     if args.cell_size <= 0.0 or args.cell_size >= 2.0:
         parser.error("--cell-size must be positive and less than 2 meters")
-    if args.search_radius <= 0.0:
-        parser.error("--search-radius must be positive")
+    if args.crop_buffer <= 0.0:
+        parser.error("--crop-buffer must be positive")
+    if args.stencil_radius <= 0.0:
+        parser.error("--stencil-radius must be positive")
     if args.baseline_speed <= 0.0:
         parser.error("--baseline-speed must be positive")
     if args.max_plot_pixels < 10_000:
@@ -529,7 +539,7 @@ def run_raster_dijkstra_route(
     elevation_path: Path,
     waypoints: list[tuple[float, float]],
     barriers: list[Polygon],
-    search_radius: float,
+    crop_buffer: float,
     baseline_speed: float,
 ) -> BaselineRoute:
     legs: list[BaselineLeg] = []
@@ -546,7 +556,7 @@ def run_raster_dijkstra_route(
             barriers=barriers,
             barrier_crs=CRS,
             clear_waypoint_cells=True,
-            search_radius=search_radius,
+            crop_buffer=crop_buffer,
         )
         result = raster_dijkstra(
             geo.sources,
@@ -989,7 +999,8 @@ def write_summary(
     elevation_path: Path,
     size: int,
     cell_size: float,
-    search_radius: float,
+    crop_buffer: float,
+    stencil_radius: float,
     baseline_speed: float,
     plot_path: Path,
 ) -> None:
@@ -1000,7 +1011,8 @@ def write_summary(
                 "elevation_path": str(elevation_path),
                 "shape": [size, size],
                 "cell_size_m": cell_size,
-                "search_radius_m": search_radius,
+                "crop_buffer_m": crop_buffer,
+                "stencil_radius_m": stencil_radius,
                 "baseline_speed_kmh": baseline_speed,
                 "vertical_factor": VERTICAL_FACTOR,
                 "barrier_count": len(route_barriers(size, cell_size)),

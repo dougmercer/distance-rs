@@ -27,9 +27,11 @@ of only along graph edges.
 
 The repository pins Python 3.13 in `.python-version` so geospatial
 dependencies such as Fiona can resolve prebuilt wheels on macOS.
+The base package depends only on NumPy; install the `geo` extra for GeoTIFF,
+GeoJSON, GeoPackage, and Shapely adapters.
 
 ```bash
-uv sync
+uv sync --extra geo
 uv run maturin develop
 uv run pytest
 ```
@@ -128,16 +130,17 @@ result = geo_distance_accumulation(
     waypoints="route.gpkg",
     land_use_costs={1: 1.0, 2: 1.8, 3: 4.0},
     barrier_values={99},
-    search_radius=250.0,
+    crop_buffer=250.0,
+    stencil_radius=80.0,
 )
 
 line_map_xy = geo_optimal_path_as_line(result, reverse=True)
 ```
 
-When `search_radius` and at least two waypoints are provided, the adapter only
-reads/reprojects the target grid cells inside the start/end bounding box buffered
-by that radius. The same radius is forwarded by `distance_kwargs()` so the
-solver and GeoTIFF crop stay in sync.
+When `crop_buffer` and at least two waypoints are provided, the adapter only
+reads/reprojects the target grid cells inside the start/end bounding box
+buffered by that radius. `stencil_radius` controls the Ordered Upwind solver
+stencil in map units.
 
 For full routes through multiple waypoints, `compute_optimal_path` runs each
 consecutive leg, stitches the map-coordinate polylines, and returns leg and total
@@ -152,8 +155,10 @@ route = compute_optimal_path(
     barriers="barriers.geojson",
     elevation="elevation.tif",
     vertical_factor="bidir_hiking_time",
-    search_radius=250.0,
+    crop_buffer=250.0,
+    stencil_radius=80.0,
     baseline_speed=5.0,
+    waypoint_crs="EPSG:4326",
 )
 
 route.path_xy
@@ -161,10 +166,11 @@ route.legs[0].metrics
 route.metrics
 ```
 
-Plain coordinate lists passed to `compute_optimal_path` default to lon/lat
-(`EPSG:4326`). Cost raster values are treated as slowdown factors: `1.0` means
-baseline speed and `2.0` means twice the travel time. Most vertical factors are
-dimensionless multipliers; the hiking-time factors already produce hours.
+Plain coordinate lists passed to geospatial helpers require `waypoint_crs`; use
+`EPSG:4326` for lon/lat. Cost raster values are treated as slowdown factors:
+`1.0` means baseline speed and `2.0` means twice the travel time. Most vertical
+factors are dimensionless multipliers; the hiking-time factors already produce
+hours.
 
 To exercise the cropped GeoTIFF path on large local files, generate synthetic
 8000 x 8000 rasters at 1.5 meter resolution, route across a small corridor, and

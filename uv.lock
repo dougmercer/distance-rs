@@ -249,9 +249,13 @@ name = "distance-rs"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fiona" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.optional-dependencies]
+geo = [
+    { name = "fiona" },
     { name = "rasterio", version = "1.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "rasterio", version = "1.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "shapely" },
@@ -259,9 +263,13 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "fiona" },
     { name = "maturin" },
     { name = "pytest" },
+    { name = "rasterio", version = "1.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "rasterio", version = "1.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "ruff" },
+    { name = "shapely" },
 ]
 plot = [
     { name = "matplotlib" },
@@ -272,17 +280,21 @@ whitebox = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fiona", specifier = ">=1.10" },
+    { name = "fiona", marker = "extra == 'geo'", specifier = ">=1.10" },
     { name = "numpy", specifier = ">=2.0" },
-    { name = "rasterio", specifier = ">=1.4" },
-    { name = "shapely", specifier = ">=2.0" },
+    { name = "rasterio", marker = "extra == 'geo'", specifier = ">=1.4" },
+    { name = "shapely", marker = "extra == 'geo'", specifier = ">=2.0" },
 ]
+provides-extras = ["geo"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fiona", specifier = ">=1.10" },
     { name = "maturin", specifier = ">=1.8,<2" },
     { name = "pytest", specifier = ">=8.0" },
+    { name = "rasterio", specifier = ">=1.4" },
     { name = "ruff", specifier = ">=0.11" },
+    { name = "shapely", specifier = ">=2.0" },
 ]
 plot = [{ name = "matplotlib", specifier = ">=3.8" }]
 whitebox = [{ name = "whitebox", specifier = ">=2.3" }]
