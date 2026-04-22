@@ -5,6 +5,7 @@ import math
 import numpy as np
 
 from distance_rs import VerticalFactor, distance_accumulation, optimal_path_as_line
+from distance_rs.baselines import raster_dijkstra, raster_dijkstra_baseline, trace_raster_path
 
 
 def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
@@ -56,3 +57,21 @@ def test_optimal_path_as_line_reaches_source() -> None:
     assert line.shape[1] == 2
     assert np.allclose(line[0], [12.0, 12.0])
     assert np.linalg.norm(line[-1] - np.array([7.0, 7.0])) <= math.sqrt(2)
+
+
+def test_raster_dijkstra_baseline_returns_distance_and_traceable_parent() -> None:
+    sources = np.zeros((9, 9), dtype=bool)
+    sources[4, 1] = True
+    barriers = np.zeros((9, 9), dtype=bool)
+    barriers[:, 4] = True
+    barriers[4, 4] = False
+
+    result = raster_dijkstra(sources, barriers=barriers, use_surface_distance=False)
+    distance_only = raster_dijkstra_baseline(sources, barriers=barriers, use_surface_distance=False)
+    line = trace_raster_path(result.parent, (4, 7))
+
+    assert np.array_equal(result.distance, distance_only)
+    assert math.isinf(result.distance[0, 4])
+    assert np.isfinite(result.distance[4, 7])
+    assert np.allclose(line[0], [7.0, 4.0])
+    assert np.allclose(line[-1], [1.0, 4.0])

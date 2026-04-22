@@ -21,25 +21,34 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from benchmarks.baseline import (  # noqa: E402
+from distance_rs import VerticalFactor, distance_accumulation
+from distance_rs.baselines import (
     MIN_COST,
-    NEIGHBORS_8,
     WHITEBOX_NODATA,
-    CaseData,
     compare_distances,
     json_safe,
     normalize_cell_size,
+    raster_dijkstra,
     read_whitebox_raster,
-    transition_cost,
+    trace_raster_path,
     write_whitebox_raster,
 )
-from distance_rs import VerticalFactor, distance_accumulation  # noqa: E402
 
 METER_PER_MILE = 1609.344
+
+
+@dataclass(frozen=True)
+class CaseData:
+    name: str
+    description: str
+    sources: npt.NDArray[np.float64]
+    cost: npt.NDArray[np.float64]
+    elevation: npt.NDArray[np.float64] | None
+    barriers: npt.NDArray[np.bool_]
+    vertical_factor: VerticalFactor
+    cell_size: float | tuple[float, float] = 1.0
+    use_surface_distance: bool = True
+    exact_reference: npt.NDArray[np.float64] | None = None
 
 
 @dataclass
@@ -196,10 +205,9 @@ def make_five_mile_case(
     y_m = (yy - rows // 2) * cell_size
     normalized_x = x_m / max(length_m, cell_size)
 
-    main_center = (
-        0.25 * width_m * np.sin(2.0 * math.pi * normalized_x * 1.7)
-        + 0.11 * width_m * np.sin(2.0 * math.pi * normalized_x * 4.3 + 0.9)
-    )
+    main_center = 0.25 * width_m * np.sin(
+        2.0 * math.pi * normalized_x * 1.7
+    ) + 0.11 * width_m * np.sin(2.0 * math.pi * normalized_x * 4.3 + 0.9)
     secondary_center = -0.28 * width_m * np.sin(2.0 * math.pi * normalized_x * 1.15 + 1.3)
 
     main_band = np.exp(-((y_m - main_center) ** 2) / (2.0 * (0.09 * width_m) ** 2))
@@ -232,9 +240,9 @@ def make_five_mile_case(
         gap_half = max(1, int(round(gap_half_m / cell_size)))
         col_slice = slice(max(0, col_start), min(cols, col_start + thickness))
         barriers[:, col_slice] = True
-        barriers[max(0, gap_center - gap_half) : min(rows, gap_center + gap_half + 1), col_slice] = (
-            False
-        )
+        barriers[
+            max(0, gap_center - gap_half) : min(rows, gap_center + gap_half + 1), col_slice
+        ] = False
 
     # Small impassable ponds near the otherwise attractive main band.
     for center_x, center_y, radius_x, radius_y in [
@@ -306,12 +314,22 @@ def run_ordered_upwind(
 
 
 def run_raster_dijkstra(case: CaseData, destination: tuple[int, int]) -> RouteResult:
+    origin = origin_for_case(case)
     start = time.perf_counter()
-    distance, parent = raster_dijkstra_with_parent(case)
+    result = raster_dijkstra(
+        case.sources,
+        cost_surface=case.cost,
+        elevation=case.elevation,
+        barriers=case.barriers,
+        vertical_factor=case.vertical_factor,
+        cell_size=case.cell_size,
+        use_surface_distance=case.use_surface_distance,
+    )
     elapsed = time.perf_counter() - start
+    distance = result.distance
     destination_cost = float(distance[destination])
     line_xy = (
-        trace_raster_path(parent, destination, case)
+        trace_raster_path(result.parent, destination, cell_size=case.cell_size, origin=origin)
         if math.isfinite(destination_cost)
         else np.empty((0, 2), dtype=np.float64)
     )
@@ -322,92 +340,6 @@ def run_raster_dijkstra(case: CaseData, destination: tuple[int, int]) -> RouteRe
         destination_cost=destination_cost,
         line_xy=line_xy,
     )
-
-
-def raster_dijkstra_with_parent(
-    case: CaseData,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64]]:
-    rows, cols = case.cost.shape
-    cost = np.maximum(case.cost, MIN_COST)
-    valid = np.isfinite(cost) & ~case.barriers
-    cell_size_x, cell_size_y = normalize_cell_size(case.cell_size)
-    elevation = np.zeros_like(cost)
-    vf = VerticalFactor.from_any(case.vertical_factor)
-
-    distance = np.full((rows, cols), np.inf, dtype=np.float64)
-    parent = np.full((rows, cols), -1, dtype=np.int64)
-    heap: list[tuple[float, int, int]] = []
-    source_rows, source_cols = np.nonzero((case.sources != 0.0) & np.isfinite(case.sources) & valid)
-    for row, col in zip(source_rows, source_cols):
-        distance[row, col] = 0.0
-        parent[row, col] = row * cols + col
-        heapq_push(heap, (0.0, int(row), int(col)))
-
-    while heap:
-        current, row, col = heapq_pop(heap)
-        if current > distance[row, col]:
-            continue
-        for dr, dc in NEIGHBORS_8:
-            next_row = row + dr
-            next_col = col + dc
-            if next_row < 0 or next_col < 0 or next_row >= rows or next_col >= cols:
-                continue
-            if not valid[next_row, next_col]:
-                continue
-            step = transition_cost(
-                row,
-                col,
-                next_row,
-                next_col,
-                cost=cost,
-                elevation=elevation,
-                has_elevation=False,
-                use_surface_distance=False,
-                vertical_factor=vf,
-                cell_size_x=cell_size_x,
-                cell_size_y=cell_size_y,
-            )
-            candidate = current + step
-            if candidate < distance[next_row, next_col]:
-                distance[next_row, next_col] = candidate
-                parent[next_row, next_col] = row * cols + col
-                heapq_push(heap, (candidate, next_row, next_col))
-
-    return distance, parent
-
-
-def heapq_push(heap: list[tuple[float, int, int]], item: tuple[float, int, int]) -> None:
-    import heapq
-
-    heapq.heappush(heap, item)
-
-
-def heapq_pop(heap: list[tuple[float, int, int]]) -> tuple[float, int, int]:
-    import heapq
-
-    return heapq.heappop(heap)
-
-
-def trace_raster_path(
-    parent: npt.NDArray[np.int64],
-    destination: tuple[int, int],
-    case: CaseData,
-) -> npt.NDArray[np.float64]:
-    rows, cols = parent.shape
-    cell_size_x, cell_size_y = normalize_cell_size(case.cell_size)
-    origin_x, origin_y = origin_for_case(case)
-    row, col = destination
-    coords: list[tuple[float, float]] = []
-    for _ in range(rows * cols):
-        coords.append((origin_x + col * cell_size_x, origin_y + row * cell_size_y))
-        parent_idx = int(parent[row, col])
-        if parent_idx < 0:
-            break
-        parent_row, parent_col = divmod(parent_idx, cols)
-        if parent_row == row and parent_col == col:
-            break
-        row, col = parent_row, parent_col
-    return np.asarray(coords, dtype=np.float64)
 
 
 def run_whitebox(case: CaseData, destination: tuple[int, int]) -> RouteResult:
@@ -549,7 +481,9 @@ def plot_route_overlay(
     source_x, source_y = cell_to_xy(case, int(source_row), int(source_col))
     dest_x, dest_y = cell_to_xy(case, destination[0], destination[1])
     ax.scatter([source_x / METER_PER_MILE], [source_y], marker="o", c="white", edgecolors="black")
-    ax.scatter([dest_x / METER_PER_MILE], [dest_y], marker="*", c="white", edgecolors="black", s=120)
+    ax.scatter(
+        [dest_x / METER_PER_MILE], [dest_y], marker="*", c="white", edgecolors="black", s=120
+    )
     ax.set_title("Five-mile 1 m route comparison over synthetic cost surface")
     ax.set_xlabel("distance along corridor (miles)")
     ax.set_ylabel("cross-corridor offset (meters)")
@@ -620,7 +554,9 @@ def plot_accumulation_panels(
                 interpolation="nearest",
                 alpha=0.95,
             )
-        ax.scatter([source_x / METER_PER_MILE], [source_y], marker="o", c="white", edgecolors="black")
+        ax.scatter(
+            [source_x / METER_PER_MILE], [source_y], marker="o", c="white", edgecolors="black"
+        )
         ax.scatter(
             [dest_x / METER_PER_MILE],
             [dest_y],

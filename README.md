@@ -87,6 +87,18 @@ The script saves a route overlay and accumulation panels over the cost surface.
 For a quick smoke test, use smaller dimensions such as
 `--length-m 300 --width-m 61`.
 
+## Barrier Detour Plot
+
+Generate a smaller route visualization comparing ordered upwind against the
+shared 8-neighbor raster Dijkstra baseline. White cells are impassable barriers,
+while the source and destination use non-white markers:
+
+```bash
+uv run python examples/barrier_detour.py
+```
+
+The script saves `results/barrier-detour/barrier_detour.png`.
+
 ## Python Example
 
 ```python

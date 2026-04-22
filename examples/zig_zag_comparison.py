@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import heapq
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,18 +11,7 @@ import numpy as np
 import numpy.typing as npt
 
 from distance_rs import distance_accumulation, optimal_path_as_line
-
-
-NEIGHBORS_8 = (
-    (-1, -1),
-    (-1, 0),
-    (-1, 1),
-    (0, -1),
-    (0, 1),
-    (1, -1),
-    (1, 0),
-    (1, 1),
-)
+from distance_rs.baselines import raster_dijkstra, trace_raster_path
 
 
 @dataclass(frozen=True)
@@ -56,20 +43,24 @@ def main() -> int:
         search_radius=args.search_radius,
         use_surface_distance=False,
     )
-    dijkstra_distance = raster_dijkstra_distance(sources, cost)
+    dijkstra = raster_dijkstra(
+        sources,
+        cost_surface=cost,
+        use_surface_distance=False,
+    )
 
     metrics = []
     routes = []
     for destination in destinations:
         ordered_line = optimal_path_as_line(ordered, destination)
-        dijkstra_line = trace_dijkstra_path(dijkstra_distance, source, destination)
+        dijkstra_line = trace_raster_path(dijkstra.parent, destination)
         route_metrics = compute_metrics(source, destination, ordered_line, dijkstra_line)
         metrics.append(route_metrics)
         routes.append((destination, ordered_line, dijkstra_line, route_metrics))
 
     output_path = args.output_dir / "zig_zag_comparison.png"
     plot_routes(cost, source, routes, output_path)
-    print_summary(routes, dijkstra_distance, ordered.distance, output_path)
+    print_summary(routes, dijkstra.distance, ordered.distance, output_path)
     return 0
 
 
@@ -88,96 +79,6 @@ def parse_args() -> argparse.Namespace:
         help="Ordered-upwind search radius in cells.",
     )
     return parser.parse_args()
-
-
-def raster_dijkstra_distance(
-    sources: npt.NDArray[np.float64],
-    cost: npt.NDArray[np.float64],
-) -> npt.NDArray[np.float64]:
-    rows, cols = sources.shape
-    distance = np.full((rows, cols), np.inf, dtype=np.float64)
-    heap: list[tuple[float, int, int]] = []
-
-    source_rows, source_cols = np.nonzero((sources != 0.0) & np.isfinite(sources))
-    for row, col in zip(source_rows, source_cols):
-        row = int(row)
-        col = int(col)
-        distance[row, col] = 0.0
-        heapq.heappush(heap, (0.0, row, col))
-
-    while heap:
-        current, row, col = heapq.heappop(heap)
-        if current > distance[row, col]:
-            continue
-
-        for dr, dc in NEIGHBORS_8:
-            next_row = row + dr
-            next_col = col + dc
-            if next_row < 0 or next_col < 0 or next_row >= rows or next_col >= cols:
-                continue
-
-            step_length = math.hypot(dr, dc)
-            local_cost = 0.5 * (cost[row, col] + cost[next_row, next_col])
-            candidate = current + step_length * local_cost
-            if candidate < distance[next_row, next_col]:
-                distance[next_row, next_col] = candidate
-                heapq.heappush(heap, (candidate, next_row, next_col))
-
-    return distance
-
-
-def trace_dijkstra_path(
-    distance: npt.NDArray[np.float64],
-    source: tuple[int, int],
-    destination: tuple[int, int],
-) -> npt.NDArray[np.float64]:
-    rows, cols = distance.shape
-    row, col = destination
-    coords: list[tuple[float, float]] = []
-    source_xy = np.asarray([source[1], source[0]], dtype=np.float64)
-    destination_xy = np.asarray([destination[1], destination[0]], dtype=np.float64)
-
-    for _ in range(rows * cols):
-        coords.append((float(col), float(row)))
-        if (row, col) == source:
-            break
-
-        current = distance[row, col]
-        candidates: list[tuple[float, float, int, int]] = []
-        for dr, dc in NEIGHBORS_8:
-            next_row = row + dr
-            next_col = col + dc
-            if next_row < 0 or next_col < 0 or next_row >= rows or next_col >= cols:
-                continue
-            step = math.hypot(dr, dc)
-            residual = abs(distance[next_row, next_col] + step - current)
-            if residual <= 1.0e-9:
-                line_error = point_line_distance(
-                    np.asarray([next_col, next_row], dtype=np.float64),
-                    source_xy,
-                    destination_xy,
-                )
-                candidates.append((line_error, distance[next_row, next_col], next_row, next_col))
-
-        if not candidates:
-            break
-        _line_error, _next_distance, row, col = min(candidates)
-
-    return np.asarray(coords, dtype=np.float64)
-
-
-def point_line_distance(
-    point: npt.NDArray[np.float64],
-    line_start: npt.NDArray[np.float64],
-    line_end: npt.NDArray[np.float64],
-) -> float:
-    line = line_end - line_start
-    length = np.linalg.norm(line)
-    if length <= 1.0e-12:
-        return float(np.linalg.norm(point - line_start))
-    delta = point - line_start
-    cross = line[0] * delta[1] - line[1] * delta[0]
-    return float(abs(cross) / length)
 
 
 def compute_metrics(
@@ -308,8 +209,12 @@ def plot_routes(
             f"turning: OUM {metrics.ordered_turn_degrees:.0f} deg, "
             f"Dijkstra {metrics.dijkstra_turn_degrees:.0f} deg"
         )
-        ax.set_xlim(min(source_xy[0], destination_xy[0]) - 8, max(source_xy[0], destination_xy[0]) + 8)
-        ax.set_ylim(min(source_xy[1], destination_xy[1]) - 8, max(source_xy[1], destination_xy[1]) + 8)
+        ax.set_xlim(
+            min(source_xy[0], destination_xy[0]) - 8, max(source_xy[0], destination_xy[0]) + 8
+        )
+        ax.set_ylim(
+            min(source_xy[1], destination_xy[1]) - 8, max(source_xy[1], destination_xy[1]) + 8
+        )
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("column")
         ax.set_ylabel("row")
