@@ -99,6 +99,17 @@ uv run python examples/barrier_detour.py
 
 The script saves `results/barrier-detour/barrier_detour.png`.
 
+## Maze Route Plot
+
+Generate a deterministic maze route visualization comparing ordered upwind
+against the shared 8-neighbor raster Dijkstra baseline:
+
+```bash
+uv run python examples/maze_route.py
+```
+
+The script saves `results/maze-route/maze_route.png`.
+
 ## Python Example
 
 ```python
