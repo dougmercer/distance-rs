@@ -269,19 +269,19 @@ def distance_accumulation(
 
     has_elevation = elevation is not None
     elevation_arr = (
-        np.zeros((rows, cols), dtype=np.float64)
+        None
         if elevation is None
         else np.ascontiguousarray(np.asarray(elevation, dtype=np.float64))
     )
-    if elevation_arr.shape != source_arr.shape:
+    if elevation_arr is not None and elevation_arr.shape != source_arr.shape:
         raise ValueError("elevation must have the same shape as sources")
 
     barrier_arr = (
-        np.zeros((rows, cols), dtype=np.bool_)
+        None
         if barriers is None
         else np.ascontiguousarray(np.asarray(barriers, dtype=np.bool_))
     )
-    if barrier_arr.shape != source_arr.shape:
+    if barrier_arr is not None and barrier_arr.shape != source_arr.shape:
         raise ValueError("barriers must have the same shape as sources")
 
     cell_size_x, cell_size_y = _normalize_cell_size(cell_size)

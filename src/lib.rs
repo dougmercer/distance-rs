@@ -215,6 +215,7 @@ struct Solver {
     valid: Vec<bool>,
     has_blocked_cells: bool,
     has_elevation: bool,
+    flat_cost_mode: bool,
     use_surface_distance: bool,
     vf: VerticalFactor,
     cell_size_x: f64,
@@ -259,6 +260,133 @@ impl BestCandidate {
         if value < self.value {
             self.value = value;
             self.parent = parent;
+        }
+    }
+}
+
+struct SegmentContext<'a> {
+    solver: &'a Solver,
+    idx: usize,
+    a_row: f64,
+    a_col: f64,
+    b_row: f64,
+    b_col: f64,
+    p_row: f64,
+    p_col: f64,
+    cost_idx: f64,
+    cost_a: f64,
+    cost_b: f64,
+    distance_a: f64,
+    distance_b: f64,
+    elevation_idx: f64,
+    elevation_a: f64,
+    elevation_b: f64,
+}
+
+impl<'a> SegmentContext<'a> {
+    fn new(solver: &'a Solver, idx: usize, a: usize, b: usize) -> Self {
+        let (a_row, a_col) = solver.row_col(a);
+        let (b_row, b_col) = solver.row_col(b);
+        let (p_row, p_col) = solver.row_col(idx);
+        let (elevation_idx, elevation_a, elevation_b) = if solver.has_elevation {
+            (
+                solver.elevation[idx],
+                solver.elevation[a],
+                solver.elevation[b],
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        Self {
+            solver,
+            idx,
+            a_row: a_row as f64,
+            a_col: a_col as f64,
+            b_row: b_row as f64,
+            b_col: b_col as f64,
+            p_row: p_row as f64,
+            p_col: p_col as f64,
+            cost_idx: solver.cost[idx],
+            cost_a: solver.cost[a],
+            cost_b: solver.cost[b],
+            distance_a: solver.distance[a],
+            distance_b: solver.distance[b],
+            elevation_idx,
+            elevation_a,
+            elevation_b,
+        }
+    }
+
+    fn objective(&self, weight_a: f64) -> f64 {
+        let weight_b = 1.0 - weight_a;
+        let y_row = weight_a * self.a_row + weight_b * self.b_row;
+        let y_col = weight_a * self.a_col + weight_b * self.b_col;
+        if !self
+            .solver
+            .segment_clear_coord_to_index(y_row, y_col, self.idx)
+        {
+            return f64::INFINITY;
+        }
+
+        let plan_distance = self
+            .solver
+            .physical_distance_coords(y_row, y_col, self.p_row, self.p_col);
+        if plan_distance <= EPS {
+            return f64::INFINITY;
+        }
+
+        let y_cost = weight_a * self.cost_a + weight_b * self.cost_b;
+        let local_cost = 0.5 * (self.cost_idx + y_cost);
+        let front_value = weight_a * self.distance_a + weight_b * self.distance_b;
+        if self.solver.flat_cost_mode {
+            return front_value + plan_distance * local_cost;
+        }
+
+        let y_elevation = weight_a * self.elevation_a + weight_b * self.elevation_b;
+        let dz = if self.solver.has_elevation {
+            self.elevation_idx - y_elevation
+        } else {
+            0.0
+        };
+        let surface_distance = self.solver.surface_distance(plan_distance, dz);
+        let angle = self.solver.vertical_angle(plan_distance, dz);
+        let vf = self.solver.vf.factor(angle);
+        if !vf.is_finite() {
+            return f64::INFINITY;
+        }
+
+        front_value + surface_distance * local_cost * vf
+    }
+
+    fn golden_section(&self, mut lo: f64, mut hi: f64) -> Option<(f64, f64)> {
+        let gr = (5.0_f64.sqrt() - 1.0) * 0.5;
+        let mut c = hi - gr * (hi - lo);
+        let mut d = lo + gr * (hi - lo);
+        let mut fc = self.objective(c);
+        let mut fd = self.objective(d);
+
+        for _ in 0..24 {
+            if fc < fd {
+                hi = d;
+                d = c;
+                fd = fc;
+                c = hi - gr * (hi - lo);
+                fc = self.objective(c);
+            } else {
+                lo = c;
+                c = d;
+                fc = fd;
+                d = lo + gr * (hi - lo);
+                fd = self.objective(d);
+            }
+        }
+
+        let weight = 0.5 * (lo + hi);
+        let value = self.objective(weight);
+        if value.is_finite() {
+            Some((value, weight))
+        } else {
+            None
         }
     }
 }
@@ -314,6 +442,7 @@ impl Solver {
             valid: input.valid,
             has_blocked_cells: input.has_blocked_cells,
             has_elevation: options.has_elevation,
+            flat_cost_mode: !options.has_elevation && options.vf.kind == VerticalFactorKind::None,
             use_surface_distance: options.use_surface_distance,
             vf: options.vf,
             cell_size_x: options.cell_size_x,
@@ -470,6 +599,10 @@ impl Solver {
         if plan_distance <= EPS {
             return None;
         }
+        let local_cost = 0.5 * (self.cost[idx] + self.cost[q]);
+        if self.flat_cost_mode {
+            return Some(self.distance[q] + plan_distance * local_cost);
+        }
         let dz = if self.has_elevation {
             self.elevation[idx] - self.elevation[q]
         } else {
@@ -481,11 +614,11 @@ impl Solver {
         if !vf.is_finite() {
             return None;
         }
-        let local_cost = 0.5 * (self.cost[idx] + self.cost[q]);
         Some(self.distance[q] + surface_distance * local_cost * vf)
     }
 
     fn segment_candidate(&self, idx: usize, a: usize, b: usize) -> Option<(f64, f64)> {
+        let context = SegmentContext::new(self, idx, a, b);
         let samples = 8usize;
         let mut best_value = f64::INFINITY;
         let mut best_weight = 0.0;
@@ -493,7 +626,7 @@ impl Solver {
 
         for i in 0..=samples {
             let weight = i as f64 / samples as f64;
-            let value = self.segment_objective(idx, a, b, weight);
+            let value = context.objective(weight);
             if value < best_value {
                 best_value = value;
                 best_weight = weight;
@@ -508,7 +641,7 @@ impl Solver {
         if best_sample > 0 && best_sample < samples {
             let lo = (best_sample - 1) as f64 / samples as f64;
             let hi = (best_sample + 1) as f64 / samples as f64;
-            if let Some((value, weight)) = self.golden_section(idx, a, b, lo, hi) {
+            if let Some((value, weight)) = context.golden_section(lo, hi) {
                 if value < best_value {
                     best_value = value;
                     best_weight = weight;
@@ -517,82 +650,6 @@ impl Solver {
         }
 
         Some((best_value, best_weight))
-    }
-
-    fn golden_section(
-        &self,
-        idx: usize,
-        a: usize,
-        b: usize,
-        mut lo: f64,
-        mut hi: f64,
-    ) -> Option<(f64, f64)> {
-        let gr = (5.0_f64.sqrt() - 1.0) * 0.5;
-        let mut c = hi - gr * (hi - lo);
-        let mut d = lo + gr * (hi - lo);
-        let mut fc = self.segment_objective(idx, a, b, c);
-        let mut fd = self.segment_objective(idx, a, b, d);
-
-        for _ in 0..24 {
-            if fc < fd {
-                hi = d;
-                d = c;
-                fd = fc;
-                c = hi - gr * (hi - lo);
-                fc = self.segment_objective(idx, a, b, c);
-            } else {
-                lo = c;
-                c = d;
-                fc = fd;
-                d = lo + gr * (hi - lo);
-                fd = self.segment_objective(idx, a, b, d);
-            }
-        }
-
-        let weight = 0.5 * (lo + hi);
-        let value = self.segment_objective(idx, a, b, weight);
-        if value.is_finite() {
-            Some((value, weight))
-        } else {
-            None
-        }
-    }
-
-    fn segment_objective(&self, idx: usize, a: usize, b: usize, weight_a: f64) -> f64 {
-        let weight_b = 1.0 - weight_a;
-        let (a_row, a_col) = self.row_col(a);
-        let (b_row, b_col) = self.row_col(b);
-        let (p_row, p_col) = self.row_col(idx);
-
-        let y_row = weight_a * a_row as f64 + weight_b * b_row as f64;
-        let y_col = weight_a * a_col as f64 + weight_b * b_col as f64;
-        if !self.segment_clear_coord_to_index(y_row, y_col, idx) {
-            return f64::INFINITY;
-        }
-
-        let plan_distance = self.physical_distance_coords(y_row, y_col, p_row as f64, p_col as f64);
-        if plan_distance <= EPS {
-            return f64::INFINITY;
-        }
-
-        let y_elevation = weight_a * self.elevation[a] + weight_b * self.elevation[b];
-        let dz = if self.has_elevation {
-            self.elevation[idx] - y_elevation
-        } else {
-            0.0
-        };
-        let surface_distance = self.surface_distance(plan_distance, dz);
-        let angle = self.vertical_angle(plan_distance, dz);
-        let vf = self.vf.factor(angle);
-        if !vf.is_finite() {
-            return f64::INFINITY;
-        }
-
-        let y_cost = weight_a * self.cost[a] + weight_b * self.cost[b];
-        let local_cost = 0.5 * (self.cost[idx] + y_cost);
-        let front_value = weight_a * self.distance[a] + weight_b * self.distance[b];
-
-        front_value + surface_distance * local_cost * vf
     }
 
     fn surface_distance(&self, plan_distance: f64, dz: f64) -> f64 {
@@ -749,8 +806,8 @@ fn distance_accumulation<'py>(
     py: Python<'py>,
     sources: PyReadonlyArray2<'py, f64>,
     cost_surface: PyReadonlyArray2<'py, f64>,
-    elevation: PyReadonlyArray2<'py, f64>,
-    barriers: PyReadonlyArray2<'py, bool>,
+    elevation: Option<PyReadonlyArray2<'py, f64>>,
+    barriers: Option<PyReadonlyArray2<'py, bool>>,
     has_elevation: bool,
     use_surface_distance: bool,
     vf_kind: &str,
@@ -767,15 +824,34 @@ fn distance_accumulation<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let sources = sources.as_array();
     let cost_surface = cost_surface.as_array();
-    let elevation = elevation.as_array();
-    let barriers = barriers.as_array();
+    let elevation = elevation.as_ref().map(|array| array.as_array());
+    let barriers = barriers.as_ref().map(|array| array.as_array());
 
     let shape = sources.shape();
     let rows = shape[0];
     let cols = shape[1];
-    if cost_surface.shape() != shape || elevation.shape() != shape || barriers.shape() != shape {
+    if cost_surface.shape() != shape {
         return Err(PyValueError::new_err(
-            "all input rasters must have the same shape",
+            "cost_surface must have the same shape as sources",
+        ));
+    }
+    if let Some(elevation) = &elevation {
+        if elevation.shape() != shape {
+            return Err(PyValueError::new_err(
+                "elevation must have the same shape as sources",
+            ));
+        }
+    }
+    if let Some(barriers) = &barriers {
+        if barriers.shape() != shape {
+            return Err(PyValueError::new_err(
+                "barriers must have the same shape as sources",
+            ));
+        }
+    }
+    if has_elevation && elevation.is_none() {
+        return Err(PyValueError::new_err(
+            "elevation is required when has_elevation is true",
         ));
     }
     if rows == 0 || cols == 0 {
@@ -804,7 +880,11 @@ fn distance_accumulation<'py>(
     };
 
     let mut cost = Vec::with_capacity(rows * cols);
-    let mut elev = Vec::with_capacity(rows * cols);
+    let mut elev = if has_elevation {
+        Vec::with_capacity(rows * cols)
+    } else {
+        Vec::new()
+    };
     let mut valid = Vec::with_capacity(rows * cols);
     let mut sources_flat = Vec::new();
     let mut has_blocked_cells = false;
@@ -813,8 +893,12 @@ fn distance_accumulation<'py>(
         for col in 0..cols {
             let idx = row * cols + col;
             let raw_cost = cost_surface[[row, col]];
-            let raw_elevation = elevation[[row, col]];
-            let blocked = barriers[[row, col]]
+            let raw_elevation = elevation
+                .as_ref()
+                .map_or(0.0, |elevation| elevation[[row, col]]);
+            let blocked = barriers
+                .as_ref()
+                .is_some_and(|barriers| barriers[[row, col]])
                 || !raw_cost.is_finite()
                 || (has_elevation && !raw_elevation.is_finite());
             has_blocked_cells |= blocked;
@@ -824,11 +908,13 @@ fn distance_accumulation<'py>(
             } else {
                 f64::INFINITY
             });
-            elev.push(if raw_elevation.is_finite() {
-                raw_elevation
-            } else {
-                0.0
-            });
+            if has_elevation {
+                elev.push(if raw_elevation.is_finite() {
+                    raw_elevation
+                } else {
+                    0.0
+                });
+            }
             let source = sources[[row, col]];
             if source.is_finite() && source != 0.0 && !blocked {
                 sources_flat.push(idx);
