@@ -25,6 +25,9 @@ of only along graph edges.
 
 ## Development
 
+The repository pins Python 3.13 in `.python-version` so geospatial
+dependencies such as Fiona can resolve prebuilt wheels on macOS.
+
 ```bash
 uv sync
 uv run maturin develop
@@ -109,6 +112,74 @@ uv run python examples/maze_route.py
 ```
 
 The script saves `results/maze-route/maze_route.png`.
+
+## GeoTIFF Adapter
+
+Use `geo_distance_accumulation` to align cost/elevation GeoTIFFs to one raster
+grid, project GeoJSON/GeoPackage/Shapely LineString waypoints into that grid,
+and trace the result back in map coordinates:
+
+```python
+from distance_rs import geo_distance_accumulation, geo_optimal_path_as_line
+
+result = geo_distance_accumulation(
+    "land_use.tif",
+    elevation_path="elevation.tif",
+    waypoints="route.gpkg",
+    land_use_costs={1: 1.0, 2: 1.8, 3: 4.0},
+    barrier_values={99},
+    search_radius=250.0,
+)
+
+line_map_xy = geo_optimal_path_as_line(result, reverse=True)
+```
+
+When `search_radius` and at least two waypoints are provided, the adapter only
+reads/reprojects the target grid cells inside the start/end bounding box buffered
+by that radius. The same radius is forwarded by `distance_kwargs()` so the
+solver and GeoTIFF crop stay in sync.
+
+For full routes through multiple waypoints, `compute_optimal_path` runs each
+consecutive leg, stitches the map-coordinate polylines, and returns leg and total
+metrics:
+
+```python
+from distance_rs import compute_optimal_path
+
+route = compute_optimal_path(
+    "cost.tif",
+    [(76.612, 39.291), (76.601, 39.303), (76.589, 39.317)],
+    barriers="barriers.geojson",
+    elevation="elevation.tif",
+    vertical_factor="bidir_hiking_time",
+    search_radius=250.0,
+    baseline_speed=5.0,
+)
+
+route.path_xy
+route.legs[0].metrics
+route.metrics
+```
+
+Plain coordinate lists passed to `compute_optimal_path` default to lon/lat
+(`EPSG:4326`). Cost raster values are treated as slowdown factors: `1.0` means
+baseline speed and `2.0` means twice the travel time. Most vertical factors are
+dimensionless multipliers; the hiking-time factors already produce hours.
+
+To exercise the cropped GeoTIFF path on large local files, generate synthetic
+8000 x 8000 rasters at 1.5 meter resolution, route across a small corridor, and
+compare ordered upwind against the simpler 8-neighbor raster Dijkstra baseline:
+
+```bash
+uv run --group plot python examples/large_geotiff_route.py
+```
+
+The generated GeoTIFFs are written under ignored `data/large-geotiff-route/`,
+and route outputs are written under ignored `results/large-geotiff-route/`,
+including a terrain/land-use comparison map PNG.
+The synthetic route includes irregular closure polygons, wetland/talus/forest
+land-use classes, and a vertical-factor cutoff that makes steep ridge faces
+impassable.
 
 ## Python Example
 
