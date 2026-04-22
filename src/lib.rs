@@ -15,6 +15,8 @@ const ACCEPTED: u8 = 2;
 const MIN_COST: f64 = 1.0e-12;
 const EPS: f64 = 1.0e-12;
 const PARALLEL_UPDATE_MIN_STENCIL: usize = 16;
+const PARALLEL_BLOCKED_FLAT_UPDATE_MIN_STENCIL: usize = 128;
+const PARALLEL_FLAT_UPDATE_MIN_STENCIL: usize = 256;
 
 const NEIGHBORS_8: [(isize, isize); 8] = [
     (-1, -1),
@@ -482,7 +484,7 @@ impl Solver {
         }
 
         for idx in accepted_sources {
-            self.update_around(idx);
+            self.update_around_full(idx);
         }
 
         while let Some(entry) = self.heap.pop() {
@@ -494,7 +496,7 @@ impl Solver {
             }
 
             self.state[entry.idx] = ACCEPTED;
-            self.update_around(entry.idx);
+            self.update_around_incremental(entry.idx);
         }
 
         Ok(SolveOutput {
@@ -507,7 +509,7 @@ impl Solver {
         })
     }
 
-    fn update_around(&mut self, center: usize) {
+    fn update_around_full(&mut self, center: usize) {
         let (center_row, center_col) = self.row_col(center);
         if self.should_parallelize_update() {
             let updates: Vec<CandidateUpdate> = self
@@ -535,6 +537,41 @@ impl Solver {
                     continue;
                 }
                 if let Some(update) = self.compute_update(idx) {
+                    self.apply_update(update);
+                }
+            }
+        }
+    }
+
+    fn update_around_incremental(&mut self, center: usize) {
+        let (center_row, center_col) = self.row_col(center);
+        if self.should_parallelize_update() {
+            let updates: Vec<CandidateUpdate> = self
+                .stencil_offsets
+                .par_iter()
+                .filter_map(|offset| {
+                    let idx = self.offset_idx(center_row, center_col, *offset)?;
+                    if !self.valid[idx] || self.state[idx] == ACCEPTED {
+                        return None;
+                    }
+                    self.compute_incremental_update(idx, center, offset.distance)
+                })
+                .collect();
+
+            for update in updates {
+                self.apply_update(update);
+            }
+        } else {
+            for offset_index in 0..self.stencil_offsets.len() {
+                let offset = self.stencil_offsets[offset_index];
+                let Some(idx) = self.offset_idx(center_row, center_col, offset) else {
+                    continue;
+                };
+                if !self.valid[idx] || self.state[idx] == ACCEPTED {
+                    continue;
+                }
+                if let Some(update) = self.compute_incremental_update(idx, center, offset.distance)
+                {
                     self.apply_update(update);
                 }
             }
@@ -579,6 +616,111 @@ impl Solver {
                     }
                 }
             }
+        }
+
+        if best.value.is_finite() {
+            Some(CandidateUpdate {
+                idx,
+                value: best.value,
+                parent: best.parent,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn compute_incremental_update(
+        &self,
+        idx: usize,
+        accepted: usize,
+        plan_distance: f64,
+    ) -> Option<CandidateUpdate> {
+        let mut best = BestCandidate::new();
+
+        let (idx_row, idx_col) = self.row_col(idx);
+        let (accepted_row, accepted_col) = self.row_col(accepted);
+        let center_dr = accepted_row as isize - idx_row as isize;
+        let center_dc = accepted_col as isize - idx_col as isize;
+        let mut lower_neighbors = [(0isize, 0isize, 0usize); NEIGHBORS_8.len()];
+        let mut lower_neighbor_count = 0usize;
+
+        for (dr, dc) in NEIGHBORS_8 {
+            let neighbor_row = accepted_row as isize + dr;
+            let neighbor_col = accepted_col as isize + dc;
+            if neighbor_row < 0
+                || neighbor_col < 0
+                || neighbor_row >= self.rows as isize
+                || neighbor_col >= self.cols as isize
+            {
+                continue;
+            }
+
+            let neighbor = self.idx(neighbor_row as usize, neighbor_col as usize);
+            if self.state[neighbor] != ACCEPTED {
+                continue;
+            }
+
+            let neighbor_dr = neighbor_row - idx_row as isize;
+            let neighbor_dc = neighbor_col - idx_col as isize;
+            if !self.offset_within_radius(neighbor_dr, neighbor_dc) {
+                continue;
+            }
+
+            if neighbor < accepted {
+                lower_neighbors[lower_neighbor_count] = (neighbor_dr, neighbor_dc, neighbor);
+                lower_neighbor_count += 1;
+            }
+        }
+        let lower_neighbors = &mut lower_neighbors[..lower_neighbor_count];
+        lower_neighbors.sort_unstable_by_key(|&(dr, dc, _neighbor)| (dr, dc));
+
+        let consider_center = |best: &mut BestCandidate| {
+            if let Some(value) = self.point_candidate(idx, accepted, plan_distance) {
+                best.consider(value, Parent::point(accepted));
+            }
+
+            for (dr, dc) in NEIGHBORS_8 {
+                let neighbor_row = accepted_row as isize + dr;
+                let neighbor_col = accepted_col as isize + dc;
+                if neighbor_row < 0
+                    || neighbor_col < 0
+                    || neighbor_row >= self.rows as isize
+                    || neighbor_col >= self.cols as isize
+                {
+                    continue;
+                }
+
+                let neighbor = self.idx(neighbor_row as usize, neighbor_col as usize);
+                if neighbor <= accepted || self.state[neighbor] != ACCEPTED {
+                    continue;
+                }
+
+                let neighbor_dr = neighbor_row - idx_row as isize;
+                let neighbor_dc = neighbor_col - idx_col as isize;
+                if !self.offset_within_radius(neighbor_dr, neighbor_dc) {
+                    continue;
+                }
+
+                if let Some((value, weight)) = self.segment_candidate(idx, accepted, neighbor) {
+                    best.consider(value, Parent::segment(accepted, neighbor, weight));
+                }
+            }
+        };
+
+        let mut center_considered = false;
+        for &(neighbor_dr, neighbor_dc, neighbor) in lower_neighbors.iter() {
+            if !center_considered && (center_dr, center_dc) < (neighbor_dr, neighbor_dc) {
+                consider_center(&mut best);
+                center_considered = true;
+            }
+
+            if let Some((value, weight)) = self.segment_candidate(idx, neighbor, accepted) {
+                best.consider(value, Parent::segment(neighbor, accepted, weight));
+            }
+        }
+
+        if !center_considered {
+            consider_center(&mut best);
         }
 
         if best.value.is_finite() {
@@ -730,8 +872,14 @@ impl Solver {
     }
 
     fn should_parallelize_update(&self) -> bool {
-        self.stencil_offsets.len() >= PARALLEL_UPDATE_MIN_STENCIL
-            && rayon::current_num_threads() > 1
+        let min_stencil = if self.vf.kind != VerticalFactorKind::None {
+            PARALLEL_UPDATE_MIN_STENCIL
+        } else if self.has_blocked_cells {
+            PARALLEL_BLOCKED_FLAT_UPDATE_MIN_STENCIL
+        } else {
+            PARALLEL_FLAT_UPDATE_MIN_STENCIL
+        };
+        self.stencil_offsets.len() >= min_stencil && rayon::current_num_threads() > 1
     }
 
     fn apply_update(&mut self, update: CandidateUpdate) {
