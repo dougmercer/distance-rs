@@ -1,0 +1,21 @@
+[package]
+name = "distance-rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "distance_rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+ndarray = "0.17"
+numpy = "0.28"
+pyo3 = "0.28"
+
+[dev-dependencies]
+approx = "0.5"
