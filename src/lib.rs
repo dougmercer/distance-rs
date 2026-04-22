@@ -215,6 +215,7 @@ struct Solver {
     cost: Vec<f64>,
     elevation: Vec<f64>,
     valid: Vec<bool>,
+    blocked_prefix: Vec<usize>,
     has_blocked_cells: bool,
     has_elevation: bool,
     flat_cost_mode: bool,
@@ -323,9 +324,10 @@ impl<'a> SegmentContext<'a> {
         let weight_b = 1.0 - weight_a;
         let y_row = weight_a * self.a_row + weight_b * self.b_row;
         let y_col = weight_a * self.a_col + weight_b * self.b_col;
-        if !self
-            .solver
-            .segment_clear_coord_to_index(y_row, y_col, self.idx)
+        if self.solver.has_blocked_cells
+            && !self
+                .solver
+                .segment_clear_coord_to_index(y_row, y_col, self.idx)
         {
             return f64::INFINITY;
         }
@@ -391,6 +393,45 @@ impl<'a> SegmentContext<'a> {
             None
         }
     }
+
+    fn constant_cost_stationary_weight(&self) -> Option<f64> {
+        let ux = (self.a_col - self.b_col) * self.solver.cell_size_x;
+        let uy = (self.a_row - self.b_row) * self.solver.cell_size_y;
+        let vx = (self.b_col - self.p_col) * self.solver.cell_size_x;
+        let vy = (self.b_row - self.p_row) * self.solver.cell_size_y;
+
+        let u_sq = ux * ux + uy * uy;
+        if u_sq <= EPS {
+            return None;
+        }
+
+        let local_cost = 0.5 * (self.cost_idx + self.cost_a);
+        if local_cost <= EPS {
+            return None;
+        }
+
+        let front_slope = self.distance_a - self.distance_b;
+        let scaled_slope = -front_slope / local_cost;
+        if scaled_slope.abs() >= u_sq.sqrt() {
+            return None;
+        }
+
+        let uv = ux * vx + uy * vy;
+        let v_sq = vx * vx + vy * vy;
+        let perpendicular_sq = (v_sq - uv * uv / u_sq).max(0.0);
+        if perpendicular_sq <= EPS {
+            return None;
+        }
+
+        let denominator = 1.0 - scaled_slope * scaled_slope / u_sq;
+        if denominator <= EPS {
+            return None;
+        }
+
+        let stationary_projection = scaled_slope.signum()
+            * (scaled_slope * scaled_slope * perpendicular_sq / denominator).sqrt();
+        Some((stationary_projection - uv) / u_sq)
+    }
 }
 
 struct SolverInput {
@@ -436,12 +477,18 @@ impl Solver {
             }
         }
         let n = input.rows * input.cols;
+        let blocked_prefix = if input.has_blocked_cells {
+            Self::build_blocked_prefix(input.rows, input.cols, &input.valid)
+        } else {
+            Vec::new()
+        };
         Self {
             rows: input.rows,
             cols: input.cols,
             cost: input.cost,
             elevation: input.elevation,
             valid: input.valid,
+            blocked_prefix,
             has_blocked_cells: input.has_blocked_cells,
             has_elevation: options.has_elevation,
             flat_cost_mode: !options.has_elevation && options.vf.kind == VerticalFactorKind::None,
@@ -761,6 +808,13 @@ impl Solver {
 
     fn segment_candidate(&self, idx: usize, a: usize, b: usize) -> Option<(f64, f64)> {
         let context = SegmentContext::new(self, idx, a, b);
+        if self.flat_cost_mode
+            && !self.has_blocked_cells
+            && (context.cost_a - context.cost_b).abs() <= EPS
+        {
+            return self.constant_cost_segment_candidate(idx, a, b, &context);
+        }
+
         let samples = 8usize;
         let mut best_value = f64::INFINITY;
         let mut best_weight = 0.0;
@@ -768,7 +822,13 @@ impl Solver {
 
         for i in 0..=samples {
             let weight = i as f64 / samples as f64;
-            let value = context.objective(weight);
+            let value = if i == 0 {
+                self.endpoint_segment_value(idx, b, context.b_row, context.b_col)
+            } else if i == samples {
+                self.endpoint_segment_value(idx, a, context.a_row, context.a_col)
+            } else {
+                context.objective(weight)
+            };
             if value < best_value {
                 best_value = value;
                 best_weight = weight;
@@ -792,6 +852,47 @@ impl Solver {
         }
 
         Some((best_value, best_weight))
+    }
+
+    fn constant_cost_segment_candidate(
+        &self,
+        idx: usize,
+        a: usize,
+        b: usize,
+        context: &SegmentContext<'_>,
+    ) -> Option<(f64, f64)> {
+        let mut best_value = self.endpoint_segment_value(idx, b, context.b_row, context.b_col);
+        let mut best_weight = 0.0;
+
+        let endpoint_a = self.endpoint_segment_value(idx, a, context.a_row, context.a_col);
+        if endpoint_a < best_value {
+            best_value = endpoint_a;
+            best_weight = 1.0;
+        }
+
+        if let Some(weight) = context.constant_cost_stationary_weight() {
+            if weight > 0.0 && weight < 1.0 {
+                let value = context.objective(weight);
+                if value < best_value {
+                    best_value = value;
+                    best_weight = weight;
+                }
+            }
+        }
+
+        if best_value.is_finite() {
+            Some((best_value, best_weight))
+        } else {
+            None
+        }
+    }
+
+    fn endpoint_segment_value(&self, idx: usize, q: usize, q_row: f64, q_col: f64) -> f64 {
+        let (idx_row, idx_col) = self.row_col(idx);
+        let plan_distance =
+            self.physical_distance_coords(q_row, q_col, idx_row as f64, idx_col as f64);
+        self.point_candidate(idx, q, plan_distance)
+            .unwrap_or(f64::INFINITY)
     }
 
     fn surface_distance(&self, plan_distance: f64, dz: f64) -> f64 {
@@ -823,6 +924,9 @@ impl Solver {
             return true;
         }
         let (row1, col1) = self.row_col(idx);
+        if self.segment_bounds_clear(row0, col0, row1, col1) {
+            return true;
+        }
         let d_row = row1 as f64 - row0;
         let d_col = col1 as f64 - col0;
         let steps = ((d_row.abs().max(d_col.abs())) * 2.0).ceil().max(1.0) as usize;
@@ -846,6 +950,41 @@ impl Solver {
             }
         }
         true
+    }
+
+    fn segment_bounds_clear(&self, row0: f64, col0: f64, row1: usize, col1: usize) -> bool {
+        if !row0.is_finite() || !col0.is_finite() {
+            return false;
+        }
+        let max_row = (self.rows - 1) as f64;
+        let max_col = (self.cols - 1) as f64;
+        if row0 < 0.0 || col0 < 0.0 || row0 > max_row || col0 > max_col {
+            return false;
+        }
+
+        let row_min = row0.min(row1 as f64).floor().max(0.0) as usize;
+        let row_max = row0.max(row1 as f64).ceil().min(max_row) as usize;
+        let col_min = col0.min(col1 as f64).floor().max(0.0) as usize;
+        let col_max = col0.max(col1 as f64).ceil().min(max_col) as usize;
+        self.blocked_count_in(row_min, row_max, col_min, col_max) == 0
+    }
+
+    fn blocked_count_in(
+        &self,
+        row_min: usize,
+        row_max: usize,
+        col_min: usize,
+        col_max: usize,
+    ) -> usize {
+        let stride = self.cols + 1;
+        let row0 = row_min;
+        let row1 = row_max + 1;
+        let col0 = col_min;
+        let col1 = col_max + 1;
+        self.blocked_prefix[row1 * stride + col1]
+            - self.blocked_prefix[row0 * stride + col1]
+            - self.blocked_prefix[row1 * stride + col0]
+            + self.blocked_prefix[row0 * stride + col0]
     }
 
     fn physical_distance_coords(&self, row0: f64, col0: f64, row1: f64, col1: f64) -> f64 {
@@ -900,6 +1039,21 @@ impl Solver {
 
     fn row_col(&self, idx: usize) -> (usize, usize) {
         (idx / self.cols, idx % self.cols)
+    }
+
+    fn build_blocked_prefix(rows: usize, cols: usize, valid: &[bool]) -> Vec<usize> {
+        let stride = cols + 1;
+        let mut prefix = vec![0; (rows + 1) * stride];
+        for row in 0..rows {
+            let mut row_blocked = 0usize;
+            for col in 0..cols {
+                if !valid[row * cols + col] {
+                    row_blocked += 1;
+                }
+                prefix[(row + 1) * stride + col + 1] = prefix[row * stride + col + 1] + row_blocked;
+            }
+        }
+        prefix
     }
 }
 
