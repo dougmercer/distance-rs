@@ -7,12 +7,14 @@ use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use rayon::prelude::*;
 
 const FAR: u8 = 0;
 const TRIAL: u8 = 1;
 const ACCEPTED: u8 = 2;
 const MIN_COST: f64 = 1.0e-12;
 const EPS: f64 = 1.0e-12;
+const PARALLEL_UPDATE_MIN_STENCIL: usize = 16;
 
 const NEIGHBORS_8: [(isize, isize); 8] = [
     (-1, -1),
@@ -211,18 +213,54 @@ struct Solver {
     cost: Vec<f64>,
     elevation: Vec<f64>,
     valid: Vec<bool>,
+    has_blocked_cells: bool,
     has_elevation: bool,
     use_surface_distance: bool,
     vf: VerticalFactor,
     cell_size_x: f64,
     cell_size_y: f64,
-    search_radius: f64,
-    radius_rows: isize,
-    radius_cols: isize,
+    search_radius_sq: f64,
+    stencil_offsets: Vec<StencilOffset>,
     distance: Vec<f64>,
     parent: Vec<Parent>,
     state: Vec<u8>,
     heap: BinaryHeap<HeapEntry>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StencilOffset {
+    dr: isize,
+    dc: isize,
+    distance: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CandidateUpdate {
+    idx: usize,
+    value: f64,
+    parent: Parent,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BestCandidate {
+    value: f64,
+    parent: Parent,
+}
+
+impl BestCandidate {
+    fn new() -> Self {
+        Self {
+            value: f64::INFINITY,
+            parent: Parent::none(),
+        }
+    }
+
+    fn consider(&mut self, value: f64, parent: Parent) {
+        if value < self.value {
+            self.value = value;
+            self.parent = parent;
+        }
+    }
 }
 
 struct SolverInput {
@@ -231,6 +269,7 @@ struct SolverInput {
     cost: Vec<f64>,
     elevation: Vec<f64>,
     valid: Vec<bool>,
+    has_blocked_cells: bool,
 }
 
 struct SolverOptions {
@@ -250,6 +289,22 @@ impl Solver {
         let radius_cols = (options.search_radius / options.cell_size_x)
             .ceil()
             .max(1.0) as isize;
+        let search_radius_sq = options.search_radius * options.search_radius;
+        let mut stencil_offsets = Vec::new();
+        for dr in -radius_rows..=radius_rows {
+            for dc in -radius_cols..=radius_cols {
+                let dx = dc as f64 * options.cell_size_x;
+                let dy = dr as f64 * options.cell_size_y;
+                let distance_sq = dx * dx + dy * dy;
+                if distance_sq <= search_radius_sq + EPS {
+                    stencil_offsets.push(StencilOffset {
+                        dr,
+                        dc,
+                        distance: distance_sq.sqrt(),
+                    });
+                }
+            }
+        }
         let n = input.rows * input.cols;
         Self {
             rows: input.rows,
@@ -257,14 +312,14 @@ impl Solver {
             cost: input.cost,
             elevation: input.elevation,
             valid: input.valid,
+            has_blocked_cells: input.has_blocked_cells,
             has_elevation: options.has_elevation,
             use_surface_distance: options.use_surface_distance,
             vf: options.vf,
             cell_size_x: options.cell_size_x,
             cell_size_y: options.cell_size_y,
-            search_radius: options.search_radius,
-            radius_rows,
-            radius_cols,
+            search_radius_sq,
+            stencil_offsets,
             distance: vec![f64::INFINITY; n],
             parent: vec![Parent::none(); n],
             state: vec![FAR; n],
@@ -325,56 +380,52 @@ impl Solver {
 
     fn update_around(&mut self, center: usize) {
         let (center_row, center_col) = self.row_col(center);
-        let row_min = (center_row as isize - self.radius_rows).max(0) as usize;
-        let row_max = (center_row as isize + self.radius_rows).min(self.rows as isize - 1) as usize;
-        let col_min = (center_col as isize - self.radius_cols).max(0) as usize;
-        let col_max = (center_col as isize + self.radius_cols).min(self.cols as isize - 1) as usize;
+        if self.should_parallelize_update() {
+            let updates: Vec<CandidateUpdate> = self
+                .stencil_offsets
+                .par_iter()
+                .filter_map(|offset| {
+                    let idx = self.offset_idx(center_row, center_col, *offset)?;
+                    if !self.valid[idx] || self.state[idx] == ACCEPTED {
+                        return None;
+                    }
+                    self.compute_update(idx)
+                })
+                .collect();
 
-        for row in row_min..=row_max {
-            for col in col_min..=col_max {
-                let idx = self.idx(row, col);
+            for update in updates {
+                self.apply_update(update);
+            }
+        } else {
+            for offset_index in 0..self.stencil_offsets.len() {
+                let offset = self.stencil_offsets[offset_index];
+                let Some(idx) = self.offset_idx(center_row, center_col, offset) else {
+                    continue;
+                };
                 if !self.valid[idx] || self.state[idx] == ACCEPTED {
                     continue;
                 }
-                if self.physical_distance_indices(center, idx) > self.search_radius + EPS {
-                    continue;
-                }
-                if let Some((value, parent)) = self.compute_update(idx) {
-                    if value + 1.0e-10 < self.distance[idx] {
-                        self.distance[idx] = value;
-                        self.parent[idx] = parent;
-                        self.state[idx] = TRIAL;
-                        self.heap.push(HeapEntry { value, idx });
-                    }
+                if let Some(update) = self.compute_update(idx) {
+                    self.apply_update(update);
                 }
             }
         }
     }
 
-    fn compute_update(&self, idx: usize) -> Option<(f64, Parent)> {
+    fn compute_update(&self, idx: usize) -> Option<CandidateUpdate> {
         let (row, col) = self.row_col(idx);
-        let row_min = (row as isize - self.radius_rows).max(0) as usize;
-        let row_max = (row as isize + self.radius_rows).min(self.rows as isize - 1) as usize;
-        let col_min = (col as isize - self.radius_cols).max(0) as usize;
-        let col_max = (col as isize + self.radius_cols).min(self.cols as isize - 1) as usize;
 
-        let mut best = f64::INFINITY;
-        let mut best_parent = Parent::none();
+        let mut best = BestCandidate::new();
 
-        for q_row in row_min..=row_max {
-            for q_col in col_min..=col_max {
-                let q = self.idx(q_row, q_col);
+        for offset in &self.stencil_offsets {
+            if let Some(q) = self.offset_idx(row, col, *offset) {
+                let q_row = (row as isize + offset.dr) as usize;
+                let q_col = (col as isize + offset.dc) as usize;
                 if self.state[q] != ACCEPTED {
                     continue;
                 }
-                if self.physical_distance_indices(q, idx) > self.search_radius + EPS {
-                    continue;
-                }
-                if let Some(value) = self.point_candidate(idx, q) {
-                    if value < best {
-                        best = value;
-                        best_parent = Parent::point(q);
-                    }
+                if let Some(value) = self.point_candidate(idx, q, offset.distance) {
+                    best.consider(value, Parent::point(q));
                 }
 
                 for (dr, dc) in NEIGHBORS_8 {
@@ -391,34 +442,31 @@ impl Solver {
                     if r <= q || self.state[r] != ACCEPTED {
                         continue;
                     }
-                    if self.physical_distance_indices(r, idx) > self.search_radius + EPS {
+                    if !self.offset_within_radius(offset.dr + dr, offset.dc + dc) {
                         continue;
                     }
                     if let Some((value, weight)) = self.segment_candidate(idx, q, r) {
-                        if value < best {
-                            best = value;
-                            best_parent = Parent::segment(q, r, weight);
-                        }
+                        best.consider(value, Parent::segment(q, r, weight));
                     }
                 }
             }
         }
 
-        if best.is_finite() {
-            Some((best, best_parent))
+        if best.value.is_finite() {
+            Some(CandidateUpdate {
+                idx,
+                value: best.value,
+                parent: best.parent,
+            })
         } else {
             None
         }
     }
 
-    fn point_candidate(&self, idx: usize, q: usize) -> Option<f64> {
+    fn point_candidate(&self, idx: usize, q: usize, plan_distance: f64) -> Option<f64> {
         if !self.segment_clear_index_to_index(q, idx) {
             return None;
         }
-        let (q_row, q_col) = self.row_col(q);
-        let (p_row, p_col) = self.row_col(idx);
-        let plan_distance =
-            self.physical_distance_coords(q_row as f64, q_col as f64, p_row as f64, p_col as f64);
         if plan_distance <= EPS {
             return None;
         }
@@ -564,11 +612,17 @@ impl Solver {
     }
 
     fn segment_clear_index_to_index(&self, a: usize, b: usize) -> bool {
+        if !self.has_blocked_cells {
+            return true;
+        }
         let (a_row, a_col) = self.row_col(a);
         self.segment_clear_coord_to_index(a_row as f64, a_col as f64, b)
     }
 
     fn segment_clear_coord_to_index(&self, row0: f64, col0: f64, idx: usize) -> bool {
+        if !self.has_blocked_cells {
+            return true;
+        }
         let (row1, col1) = self.row_col(idx);
         let d_row = row1 as f64 - row0;
         let d_col = col1 as f64 - col0;
@@ -595,14 +649,44 @@ impl Solver {
         true
     }
 
-    fn physical_distance_indices(&self, a: usize, b: usize) -> f64 {
-        let (a_row, a_col) = self.row_col(a);
-        let (b_row, b_col) = self.row_col(b);
-        self.physical_distance_coords(a_row as f64, a_col as f64, b_row as f64, b_col as f64)
-    }
-
     fn physical_distance_coords(&self, row0: f64, col0: f64, row1: f64, col1: f64) -> f64 {
         ((col1 - col0) * self.cell_size_x).hypot((row1 - row0) * self.cell_size_y)
+    }
+
+    fn offset_idx(&self, row: usize, col: usize, offset: StencilOffset) -> Option<usize> {
+        let offset_row = row as isize + offset.dr;
+        let offset_col = col as isize + offset.dc;
+        if offset_row < 0
+            || offset_col < 0
+            || offset_row >= self.rows as isize
+            || offset_col >= self.cols as isize
+        {
+            return None;
+        }
+        Some(self.idx(offset_row as usize, offset_col as usize))
+    }
+
+    fn offset_within_radius(&self, dr: isize, dc: isize) -> bool {
+        let dx = dc as f64 * self.cell_size_x;
+        let dy = dr as f64 * self.cell_size_y;
+        dx * dx + dy * dy <= self.search_radius_sq + EPS
+    }
+
+    fn should_parallelize_update(&self) -> bool {
+        self.stencil_offsets.len() >= PARALLEL_UPDATE_MIN_STENCIL
+            && rayon::current_num_threads() > 1
+    }
+
+    fn apply_update(&mut self, update: CandidateUpdate) {
+        if update.value + 1.0e-10 < self.distance[update.idx] {
+            self.distance[update.idx] = update.value;
+            self.parent[update.idx] = update.parent;
+            self.state[update.idx] = TRIAL;
+            self.heap.push(HeapEntry {
+                value: update.value,
+                idx: update.idx,
+            });
+        }
     }
 
     fn idx(&self, row: usize, col: usize) -> usize {
@@ -723,6 +807,7 @@ fn distance_accumulation<'py>(
     let mut elev = Vec::with_capacity(rows * cols);
     let mut valid = Vec::with_capacity(rows * cols);
     let mut sources_flat = Vec::new();
+    let mut has_blocked_cells = false;
 
     for row in 0..rows {
         for col in 0..cols {
@@ -732,6 +817,7 @@ fn distance_accumulation<'py>(
             let blocked = barriers[[row, col]]
                 || !raw_cost.is_finite()
                 || (has_elevation && !raw_elevation.is_finite());
+            has_blocked_cells |= blocked;
             valid.push(!blocked);
             cost.push(if raw_cost.is_finite() {
                 raw_cost.max(MIN_COST)
@@ -757,6 +843,7 @@ fn distance_accumulation<'py>(
             cost,
             elevation: elev,
             valid,
+            has_blocked_cells,
         },
         SolverOptions {
             has_elevation,

@@ -16,6 +16,7 @@ extension-module = ["pyo3/extension-module"]
 ndarray = "0.17"
 numpy = "0.28"
 pyo3 = "0.28"
+rayon = "1.11"
 
 [dev-dependencies]
 approx = "0.5"
