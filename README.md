@@ -115,6 +115,23 @@ uv run python examples/maze_route.py
 
 The script saves `results/maze-route/maze_route.png`.
 
+## Ridge Pass Showcase
+
+Generate a terrain example designed to make the solver differences visible:
+Whitebox `CostDistance` sees only a cheap friction road across a ridge,
+8-neighbor Dijkstra receives the same elevation and vertical-factor cutoff as
+`distance-rs` but remains grid-constrained, and ordered upwind uses continuous
+front updates through the lower saddle:
+
+```bash
+uv sync --group plot --group whitebox
+uv run --group whitebox python examples/ridge_pass_showcase.py
+```
+
+The script saves `results/ridge-pass-showcase/ridge_pass_showcase.png` and a
+JSON summary. If Whitebox is not installed, run
+`--solvers ordered_upwind raster` to generate the distance-rs/Dijkstra overlay.
+
 ## GeoTIFF Adapter
 
 Use `geo_distance_accumulation` to align cost/elevation GeoTIFFs to one raster
