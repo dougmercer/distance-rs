@@ -104,6 +104,22 @@ uv run python examples/barrier_detour.py
 
 The script saves `results/barrier-detour/barrier_detour.png`.
 
+## Zig-Zag Comparison
+
+Generate a flat-cost any-angle comparison with 45, 60, 75, and 85 degree
+routes. The 45-degree case is exactly representable by 8-neighbor Dijkstra,
+while nearby headings force Dijkstra into longer stair-step paths with much
+larger cumulative cross-track area between the traced route and the optimal
+straight line. The plot also overlays the exact analytic envelope of equal-cost
+Dijkstra routes in both the route and cumulative-area panels, with the
+stored-parent route highlighted inside that envelope:
+
+```bash
+uv run python examples/zig_zag_comparison.py --output-dir results/zig-zag-comparison
+```
+
+The script saves `results/zig-zag-comparison/zig_zag_comparison.png`.
+
 ## Maze Route Plot
 
 Generate a deterministic maze route visualization comparing ordered upwind
