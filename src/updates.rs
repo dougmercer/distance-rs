@@ -8,6 +8,14 @@ struct CandidateUpdate {
     parent: Parent,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct AcceptedNeighbor {
+    dr: isize,
+    dc: isize,
+    idx: usize,
+    distance: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BestCandidate {
     value: f64,
@@ -26,6 +34,18 @@ impl BestCandidate {
         if value < self.value {
             self.value = value;
             self.parent = parent;
+        }
+    }
+
+    fn into_update(self, idx: usize) -> Option<CandidateUpdate> {
+        if self.value.is_finite() {
+            Some(CandidateUpdate {
+                idx,
+                value: self.value,
+                parent: self.parent,
+            })
+        } else {
+            None
         }
     }
 }
@@ -231,54 +251,23 @@ impl Solver {
     }
 
     fn compute_update(&self, idx: usize) -> Option<CandidateUpdate> {
-        let (row, col) = self.row_col(idx);
-
         let mut best = BestCandidate::new();
+        let (neighbors, neighbor_count) = self.accepted_neighbors(idx);
+        let neighbors = &neighbors[..neighbor_count];
 
-        for offset in &self.grid.stencil_offsets {
-            if let Some(q) = self.offset_idx(row, col, *offset) {
-                let q_row = (row as isize + offset.dr) as usize;
-                let q_col = (col as isize + offset.dc) as usize;
-                if !self.is_accepted(q) {
-                    continue;
-                }
-                if let Some(value) = self.point_candidate(idx, q, offset.distance) {
-                    best.consider(value, Parent::point(q));
-                }
+        for &q in neighbors {
+            self.consider_point_candidate(&mut best, idx, q.idx, q.distance);
 
-                for (dr, dc) in NEIGHBORS_8 {
-                    let r_row = q_row as isize + dr;
-                    let r_col = q_col as isize + dc;
-                    if r_row < 0
-                        || r_col < 0
-                        || r_row >= self.rows() as isize
-                        || r_col >= self.cols() as isize
-                    {
-                        continue;
-                    }
-                    let r = self.idx(r_row as usize, r_col as usize);
-                    if r <= q || !self.is_accepted(r) {
-                        continue;
-                    }
-                    if !self.offset_within_radius(offset.dr + dr, offset.dc + dc) {
-                        continue;
-                    }
-                    if let Some((value, weight)) = self.segment_candidate(idx, q, r) {
-                        best.consider(value, Parent::segment(q, r, weight));
-                    }
+            let (adjacent_neighbors, adjacent_neighbor_count) =
+                self.accepted_neighbors_adjacent_to(idx, q.idx);
+            for &r in &adjacent_neighbors[..adjacent_neighbor_count] {
+                if r.idx > q.idx {
+                    self.consider_segment_candidate(&mut best, idx, q.idx, r.idx);
                 }
             }
         }
 
-        if best.value.is_finite() {
-            Some(CandidateUpdate {
-                idx,
-                value: best.value,
-                parent: best.parent,
-            })
-        } else {
-            None
-        }
+        best.into_update(idx)
     }
 
     fn compute_incremental_update(
@@ -293,8 +282,79 @@ impl Solver {
         let (accepted_row, accepted_col) = self.row_col(accepted);
         let center_dr = accepted_row as isize - idx_row as isize;
         let center_dc = accepted_col as isize - idx_col as isize;
-        let mut lower_neighbors = [(0isize, 0isize, 0usize); NEIGHBORS_8.len()];
+        let mut lower_neighbors = [AcceptedNeighbor::default(); NEIGHBORS_8.len()];
         let mut lower_neighbor_count = 0usize;
+        let (adjacent_neighbors, adjacent_neighbor_count) =
+            self.accepted_neighbors_adjacent_to(idx, accepted);
+
+        for &neighbor in &adjacent_neighbors[..adjacent_neighbor_count] {
+            if neighbor.idx < accepted {
+                lower_neighbors[lower_neighbor_count] = neighbor;
+                lower_neighbor_count += 1;
+            }
+        }
+        let lower_neighbors = &mut lower_neighbors[..lower_neighbor_count];
+        lower_neighbors.sort_unstable_by_key(|neighbor| (neighbor.dr, neighbor.dc));
+
+        let consider_center = |best: &mut BestCandidate| {
+            self.consider_point_candidate(best, idx, accepted, plan_distance);
+            for &neighbor in &adjacent_neighbors[..adjacent_neighbor_count] {
+                if neighbor.idx > accepted {
+                    self.consider_segment_candidate(best, idx, accepted, neighbor.idx);
+                }
+            }
+        };
+
+        let mut center_considered = false;
+        for &neighbor in lower_neighbors.iter() {
+            if !center_considered && (center_dr, center_dc) < (neighbor.dr, neighbor.dc) {
+                consider_center(&mut best);
+                center_considered = true;
+            }
+
+            self.consider_segment_candidate(&mut best, idx, neighbor.idx, accepted);
+        }
+
+        if !center_considered {
+            consider_center(&mut best);
+        }
+
+        best.into_update(idx)
+    }
+
+    fn accepted_neighbors(&self, idx: usize) -> ([AcceptedNeighbor; 9], usize) {
+        let (row, col) = self.row_col(idx);
+        let mut neighbors = [AcceptedNeighbor::default(); 9];
+        let mut count = 0usize;
+
+        for offset in &self.grid.stencil_offsets {
+            let Some(neighbor) = self.offset_idx(row, col, *offset) else {
+                continue;
+            };
+            if !self.is_accepted(neighbor) {
+                continue;
+            }
+            neighbors[count] = AcceptedNeighbor {
+                dr: offset.dr,
+                dc: offset.dc,
+                idx: neighbor,
+                distance: offset.distance,
+            };
+            count += 1;
+        }
+
+        (neighbors, count)
+    }
+
+    fn accepted_neighbors_adjacent_to(
+        &self,
+        idx: usize,
+        accepted: usize,
+    ) -> ([AcceptedNeighbor; 8], usize) {
+        let (idx_row, idx_col) = self.row_col(idx);
+        let (accepted_row, accepted_col) = self.row_col(accepted);
+        let mut neighbors = [AcceptedNeighbor::default(); 8];
+        let mut count = 0usize;
 
         for (dr, dc) in NEIGHBORS_8 {
             let neighbor_row = accepted_row as isize + dr;
@@ -318,71 +378,33 @@ impl Solver {
                 continue;
             }
 
-            if neighbor < accepted {
-                lower_neighbors[lower_neighbor_count] = (neighbor_dr, neighbor_dc, neighbor);
-                lower_neighbor_count += 1;
-            }
-        }
-        let lower_neighbors = &mut lower_neighbors[..lower_neighbor_count];
-        lower_neighbors.sort_unstable_by_key(|&(dr, dc, _neighbor)| (dr, dc));
-
-        let consider_center = |best: &mut BestCandidate| {
-            if let Some(value) = self.point_candidate(idx, accepted, plan_distance) {
-                best.consider(value, Parent::point(accepted));
-            }
-
-            for (dr, dc) in NEIGHBORS_8 {
-                let neighbor_row = accepted_row as isize + dr;
-                let neighbor_col = accepted_col as isize + dc;
-                if neighbor_row < 0
-                    || neighbor_col < 0
-                    || neighbor_row >= self.rows() as isize
-                    || neighbor_col >= self.cols() as isize
-                {
-                    continue;
-                }
-
-                let neighbor = self.idx(neighbor_row as usize, neighbor_col as usize);
-                if neighbor <= accepted || !self.is_accepted(neighbor) {
-                    continue;
-                }
-
-                let neighbor_dr = neighbor_row - idx_row as isize;
-                let neighbor_dc = neighbor_col - idx_col as isize;
-                if !self.offset_within_radius(neighbor_dr, neighbor_dc) {
-                    continue;
-                }
-
-                if let Some((value, weight)) = self.segment_candidate(idx, accepted, neighbor) {
-                    best.consider(value, Parent::segment(accepted, neighbor, weight));
-                }
-            }
-        };
-
-        let mut center_considered = false;
-        for &(neighbor_dr, neighbor_dc, neighbor) in lower_neighbors.iter() {
-            if !center_considered && (center_dr, center_dc) < (neighbor_dr, neighbor_dc) {
-                consider_center(&mut best);
-                center_considered = true;
-            }
-
-            if let Some((value, weight)) = self.segment_candidate(idx, neighbor, accepted) {
-                best.consider(value, Parent::segment(neighbor, accepted, weight));
-            }
+            neighbors[count] = AcceptedNeighbor {
+                dr: neighbor_dr,
+                dc: neighbor_dc,
+                idx: neighbor,
+                distance: 0.0,
+            };
+            count += 1;
         }
 
-        if !center_considered {
-            consider_center(&mut best);
-        }
+        (neighbors, count)
+    }
 
-        if best.value.is_finite() {
-            Some(CandidateUpdate {
-                idx,
-                value: best.value,
-                parent: best.parent,
-            })
-        } else {
-            None
+    fn consider_point_candidate(
+        &self,
+        best: &mut BestCandidate,
+        idx: usize,
+        q: usize,
+        plan_distance: f64,
+    ) {
+        if let Some(value) = self.point_candidate(idx, q, plan_distance) {
+            best.consider(value, Parent::point(q));
+        }
+    }
+
+    fn consider_segment_candidate(&self, best: &mut BestCandidate, idx: usize, a: usize, b: usize) {
+        if let Some((value, weight)) = self.segment_candidate(idx, a, b) {
+            best.consider(value, Parent::segment(a, b, weight));
         }
     }
 
