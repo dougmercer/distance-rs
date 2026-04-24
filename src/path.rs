@@ -1,45 +1,6 @@
-use std::f64::consts::PI;
-
 use ndarray::ArrayView2;
 
 use crate::grid_segment;
-use crate::solver::SolveOutput;
-
-impl SolveOutput {
-    pub(crate) fn back_direction(&self) -> Vec<f64> {
-        let mut back_direction = vec![f64::NAN; self.rows * self.cols];
-        for (idx, direction) in back_direction.iter_mut().enumerate() {
-            let parent = self.parent[idx];
-            if parent.a < 0 {
-                continue;
-            }
-
-            let row = idx / self.cols;
-            let col = idx % self.cols;
-            let (parent_row, parent_col) = if parent.b < 0 {
-                let a = parent.a as usize;
-                ((a / self.cols) as f64, (a % self.cols) as f64)
-            } else {
-                let a = parent.a as usize;
-                let b = parent.b as usize;
-                let weight_b = 1.0 - parent.weight;
-                (
-                    parent.weight * (a / self.cols) as f64 + weight_b * (b / self.cols) as f64,
-                    parent.weight * (a % self.cols) as f64 + weight_b * (b % self.cols) as f64,
-                )
-            };
-
-            let d_x = (parent_col - col as f64) * self.cell_size_x;
-            let d_y = (parent_row - row as f64) * self.cell_size_y;
-            let mut degrees = d_x.atan2(-d_y) * 180.0 / PI;
-            if degrees < 0.0 {
-                degrees += 360.0;
-            }
-            *direction = degrees;
-        }
-        back_direction
-    }
-}
 
 #[derive(Debug)]
 pub(crate) enum PathTraceError {

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import math
-import subprocess
-import sys
 
 import numpy as np
 import pytest
@@ -114,6 +112,16 @@ def test_optimal_path_as_line_traces_back_direction_without_zig_zag() -> None:
     assert _path_area_from_straight_line(line, source, destination) < 50.0
 
 
+def test_flat_back_direction_tracks_euclidean_angle() -> None:
+    source = (10, 10)
+    destination = (13, 14)
+    result = distance_accumulation(np.ones((21, 21), dtype=float), source=source)
+
+    expected = _back_direction_degrees(source, destination)
+
+    assert _angle_delta(result._back_direction[destination], expected) < 5.0
+
+
 def test_optimal_path_as_line_repairs_invalid_direction_step_locally() -> None:
     source, destination, cost, barriers = _make_maze_case(
         maze_rows=11,
@@ -172,6 +180,16 @@ def _path_area_from_straight_line(
     progress = progress[order]
     cross_track = cross_track[order]
     return float(np.sum(0.5 * np.diff(progress) * (cross_track[:-1] + cross_track[1:])))
+
+
+def _back_direction_degrees(source: tuple[int, int], destination: tuple[int, int]) -> float:
+    delta_x = source[1] - destination[1]
+    delta_y = source[0] - destination[0]
+    return (math.degrees(math.atan2(delta_x, -delta_y)) + 360.0) % 360.0
+
+
+def _angle_delta(actual: float, expected: float) -> float:
+    return abs((actual - expected + 180.0) % 360.0 - 180.0)
 
 
 def _polyline_length(line: np.ndarray) -> float:

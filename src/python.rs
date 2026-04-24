@@ -129,7 +129,6 @@ fn distance_accumulation<'py>(
     });
     let output = solver.solve(&sources_flat)?;
 
-    let back_direction = output.back_direction();
     let parent_a: Vec<i64> = output.parent.iter().map(|parent| parent.a).collect();
 
     let dict = PyDict::new(py);
@@ -141,7 +140,7 @@ fn distance_accumulation<'py>(
     )?;
     dict.set_item(
         "back_direction",
-        Array2::from_shape_vec((rows, cols), back_direction)
+        Array2::from_shape_vec((rows, cols), output.back_direction)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
             .into_pyarray(py),
     )?;

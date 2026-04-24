@@ -45,33 +45,19 @@ impl Ord for HeapEntry {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Parent {
     pub(crate) a: i64,
-    pub(crate) b: i64,
-    pub(crate) weight: f64,
 }
 
 impl Parent {
     pub(crate) fn none() -> Self {
-        Self {
-            a: -1,
-            b: -1,
-            weight: f64::NAN,
-        }
+        Self { a: -1 }
     }
 
     pub(crate) fn point(a: usize) -> Self {
-        Self {
-            a: a as i64,
-            b: -1,
-            weight: 1.0,
-        }
+        Self { a: a as i64 }
     }
 
-    pub(crate) fn segment(a: usize, b: usize, weight: f64) -> Self {
-        Self {
-            a: a as i64,
-            b: b as i64,
-            weight,
-        }
+    pub(crate) fn segment(a: usize, _b: usize, _weight: f64) -> Self {
+        Self { a: a as i64 }
     }
 }
 
@@ -85,6 +71,7 @@ pub(crate) struct Solver {
     pub(crate) vf: VerticalFactor,
     pub(crate) distance: Vec<f64>,
     pub(crate) parent: Vec<Parent>,
+    pub(crate) back_direction: Vec<f64>,
     pub(crate) state: Vec<u8>,
     pub(crate) heap: BinaryHeap<HeapEntry>,
 }
@@ -103,12 +90,9 @@ pub(crate) struct SolverInput {
 }
 
 pub(crate) struct SolveOutput {
-    pub(crate) rows: usize,
-    pub(crate) cols: usize,
     pub(crate) distance: Vec<f64>,
     pub(crate) parent: Vec<Parent>,
-    pub(crate) cell_size_x: f64,
-    pub(crate) cell_size_y: f64,
+    pub(crate) back_direction: Vec<f64>,
 }
 
 impl Solver {
@@ -127,6 +111,7 @@ impl Solver {
             vf: input.vf,
             distance: vec![f64::INFINITY; n],
             parent: vec![Parent::none(); n],
+            back_direction: vec![f64::NAN; n],
             state: vec![FAR; n],
             heap: BinaryHeap::new(),
         }
@@ -174,12 +159,9 @@ impl Solver {
         }
 
         Ok(SolveOutput {
-            rows: self.grid.rows,
-            cols: self.grid.cols,
             distance: self.distance,
             parent: self.parent,
-            cell_size_x: self.grid.cell_size_x,
-            cell_size_y: self.grid.cell_size_y,
+            back_direction: self.back_direction,
         })
     }
 

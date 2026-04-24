@@ -9,7 +9,8 @@ The distance solver uses an accepted-front method with Esri-style local Eikonal
 updates. Candidate nodes are updated from accepted points and accepted front
 segments in the 3-by-3 neighborhood, which lets the front cross cells at
 continuous angles without letting updates jump over intervening cost or barrier
-cells.
+cells. Segment updates store a local accumulated-surface back direction for
+path tracing, with barrier cases falling back to the verified parent segment.
 
 ## Features
 
@@ -20,7 +21,7 @@ cells.
   `symmetric_inverse_linear`, `cos`, `sec`, `cos_sec`, `sec_cos`,
   `hiking_time`, and `bidir_hiking_time`.
 - Barrier masks and NoData handling via non-finite cost/elevation values.
-- Continuous path extraction from the parent field produced by accumulation.
+- Continuous path extraction from the back-direction field produced by accumulation.
 - `uv` + `maturin` development setup.
 
 ## Development

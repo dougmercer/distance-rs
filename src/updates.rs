@@ -6,6 +6,7 @@ struct CandidateUpdate {
     idx: usize,
     value: f64,
     parent: Parent,
+    back_direction: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -20,6 +21,7 @@ struct AcceptedNeighbor {
 struct BestCandidate {
     value: f64,
     parent: Parent,
+    back_direction: f64,
 }
 
 impl BestCandidate {
@@ -27,13 +29,15 @@ impl BestCandidate {
         Self {
             value: f64::INFINITY,
             parent: Parent::none(),
+            back_direction: f64::NAN,
         }
     }
 
-    fn consider(&mut self, value: f64, parent: Parent) {
+    fn consider(&mut self, value: f64, parent: Parent, back_direction: f64) {
         if value < self.value {
             self.value = value;
             self.parent = parent;
+            self.back_direction = back_direction;
         }
     }
 
@@ -43,6 +47,7 @@ impl BestCandidate {
                 idx,
                 value: self.value,
                 parent: self.parent,
+                back_direction: self.back_direction,
             })
         } else {
             None
@@ -175,6 +180,38 @@ impl<'a> SegmentContext<'a> {
         } else {
             None
         }
+    }
+
+    fn plane_back_direction(&self, value_idx: f64) -> Option<f64> {
+        let p_x = self.p_col * self.solver.grid.cell_size_x;
+        let p_y = self.p_row * self.solver.grid.cell_size_y;
+        let a_x = self.a_col * self.solver.grid.cell_size_x;
+        let a_y = self.a_row * self.solver.grid.cell_size_y;
+        let b_x = self.b_col * self.solver.grid.cell_size_x;
+        let b_y = self.b_row * self.solver.grid.cell_size_y;
+
+        let ap_x = a_x - p_x;
+        let ap_y = a_y - p_y;
+        let bp_x = b_x - p_x;
+        let bp_y = b_y - p_y;
+        let det = ap_x * bp_y - ap_y * bp_x;
+        if det.abs() <= EPS {
+            return None;
+        }
+
+        let da = self.distance_a - value_idx;
+        let db = self.distance_b - value_idx;
+        let grad_x = (da * bp_y - ap_y * db) / det;
+        let grad_y = (ap_x * db - da * bp_x) / det;
+        Solver::direction_from_delta(-grad_x, -grad_y)
+    }
+
+    fn parent_back_direction(&self, weight_a: f64) -> Option<f64> {
+        let weight_b = 1.0 - weight_a;
+        let parent_row = weight_a * self.a_row + weight_b * self.b_row;
+        let parent_col = weight_a * self.a_col + weight_b * self.b_col;
+        self.solver
+            .back_direction_to_coord(self.idx, parent_row, parent_col)
     }
 
     fn constant_cost_stationary_weight(&self) -> Option<f64> {
@@ -398,13 +435,15 @@ impl Solver {
         plan_distance: f64,
     ) {
         if let Some(value) = self.point_candidate(idx, q, plan_distance) {
-            best.consider(value, Parent::point(q));
+            if let Some(back_direction) = self.back_direction_to_index(idx, q) {
+                best.consider(value, Parent::point(q), back_direction);
+            }
         }
     }
 
     fn consider_segment_candidate(&self, best: &mut BestCandidate, idx: usize, a: usize, b: usize) {
-        if let Some((value, weight)) = self.segment_candidate(idx, a, b) {
-            best.consider(value, Parent::segment(a, b, weight));
+        if let Some((value, weight, back_direction)) = self.segment_candidate(idx, a, b) {
+            best.consider(value, Parent::segment(a, b, weight), back_direction);
         }
     }
 
@@ -433,7 +472,7 @@ impl Solver {
         Some(self.distance[q] + surface_distance * local_cost * vf)
     }
 
-    fn segment_candidate(&self, idx: usize, a: usize, b: usize) -> Option<(f64, f64)> {
+    fn segment_candidate(&self, idx: usize, a: usize, b: usize) -> Option<(f64, f64, f64)> {
         let context = SegmentContext::new(self, idx, a, b);
         if self.flat_cost_mode
             && !self.barriers.has_blocked_cells()
@@ -478,7 +517,8 @@ impl Solver {
             }
         }
 
-        Some((best_value, best_weight))
+        let back_direction = self.segment_back_direction(&context, best_value, best_weight)?;
+        Some((best_value, best_weight, back_direction))
     }
 
     fn constant_cost_segment_candidate(
@@ -487,7 +527,7 @@ impl Solver {
         a: usize,
         b: usize,
         context: &SegmentContext<'_>,
-    ) -> Option<(f64, f64)> {
+    ) -> Option<(f64, f64, f64)> {
         let mut best_value = self.endpoint_segment_value(idx, b, context.b_row, context.b_col);
         let mut best_weight = 0.0;
 
@@ -508,7 +548,8 @@ impl Solver {
         }
 
         if best_value.is_finite() {
-            Some((best_value, best_weight))
+            let back_direction = self.segment_back_direction(context, best_value, best_weight)?;
+            Some((best_value, best_weight, back_direction))
         } else {
             None
         }
@@ -520,6 +561,21 @@ impl Solver {
             self.physical_distance_coords(q_row, q_col, idx_row as f64, idx_col as f64);
         self.point_candidate(idx, q, plan_distance)
             .unwrap_or(f64::INFINITY)
+    }
+
+    fn segment_back_direction(
+        &self,
+        context: &SegmentContext<'_>,
+        value: f64,
+        weight: f64,
+    ) -> Option<f64> {
+        let parent_direction = || context.parent_back_direction(weight);
+        if self.barriers.has_blocked_cells() {
+            return parent_direction();
+        }
+        context
+            .plane_back_direction(value)
+            .or_else(parent_direction)
     }
 
     fn surface_distance(&self, plan_distance: f64, dz: f64) -> f64 {
@@ -542,11 +598,35 @@ impl Solver {
         if update.value + 1.0e-10 < self.distance[update.idx] {
             self.distance[update.idx] = update.value;
             self.parent[update.idx] = update.parent;
+            self.back_direction[update.idx] = update.back_direction;
             self.state[update.idx] = TRIAL;
             self.heap.push(HeapEntry {
                 value: update.value,
                 idx: update.idx,
             });
         }
+    }
+
+    fn back_direction_to_index(&self, idx: usize, target: usize) -> Option<f64> {
+        let (target_row, target_col) = self.row_col(target);
+        self.back_direction_to_coord(idx, target_row as f64, target_col as f64)
+    }
+
+    fn back_direction_to_coord(&self, idx: usize, target_row: f64, target_col: f64) -> Option<f64> {
+        let (row, col) = self.row_col(idx);
+        let dx = (target_col - col as f64) * self.grid.cell_size_x;
+        let dy = (target_row - row as f64) * self.grid.cell_size_y;
+        Self::direction_from_delta(dx, dy)
+    }
+
+    fn direction_from_delta(dx: f64, dy: f64) -> Option<f64> {
+        if !dx.is_finite() || !dy.is_finite() || dx.hypot(dy) <= EPS {
+            return None;
+        }
+        let mut degrees = dx.atan2(-dy).to_degrees();
+        if degrees < 0.0 {
+            degrees += 360.0;
+        }
+        Some(degrees)
     }
 }
