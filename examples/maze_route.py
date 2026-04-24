@@ -90,7 +90,7 @@ def parse_args() -> argparse.Namespace:
         "--search-radius",
         type=float,
         default=7.0,
-        help="Ordered-upwind search radius in cells.",
+        help="Compatibility search radius in cells; the native solver uses a local 3x3 stencil.",
     )
     args = parser.parse_args()
 

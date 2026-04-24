@@ -249,7 +249,11 @@ class RasterSurface:
 
 @dataclass(frozen=True)
 class SolverOptions:
-    """Numerical options for distance accumulation."""
+    """Numerical options for distance accumulation.
+
+    `stencil_radius` is retained for compatibility with earlier releases. The
+    native solver uses an Esri-style local 3-by-3 Eikonal stencil.
+    """
 
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None
     stencil_radius: float | None = None

@@ -5,11 +5,11 @@ continuous path extraction. It is intended as a foundation for replacing ArcGIS-
 `DistanceAccumulation` and `OptimalPathAsLine` workflows without reducing the solver
 to an 8-neighbor graph shortest-path problem.
 
-The distance solver uses an Ordered Upwind style accepted-front method. Candidate
-nodes are updated from accepted points and accepted front segments inside a
-configurable continuous stencil. Segment updates minimize over interpolated points
-on the accepted front, which lets the front cross cells at continuous angles instead
-of only along graph edges.
+The distance solver uses an accepted-front method with Esri-style local Eikonal
+updates. Candidate nodes are updated from accepted points and accepted front
+segments in the 3-by-3 neighborhood, which lets the front cross cells at
+continuous angles without letting updates jump over intervening cost or barrier
+cells.
 
 ## Features
 
@@ -201,8 +201,9 @@ overridden by `GridSpec`. Vector files infer CRS from file metadata; GeoJSON
 defaults to `EPSG:4326`. Plain coordinate lists and Shapely geometries must be
 wrapped in `GeoPoints(..., crs=...)` or `GeoBarriers(..., crs=...)`. `margin`
 crops each route leg to the start/end bounding box plus that many map units,
-snapped to the cost raster grid. `stencil_radius` controls the Ordered Upwind
-solver stencil in map units.
+snapped to the cost raster grid. `stencil_radius` is retained for API
+compatibility; the native solver now uses a local 3-by-3 Eikonal stencil for
+ArcGIS-style behavior.
 
 To exercise the cropped GeoTIFF path on large local files, generate synthetic
 8000 x 8000 rasters at 1.5 meter resolution, route across a small corridor, and
@@ -255,6 +256,6 @@ result = distance_accumulation(
 line = optimal_path_as_line(result, destination=(90, 90))
 ```
 
-The `stencil_radius` controls the Ordered Upwind stencil in map units. Larger values
-increase the accepted-front region considered for anisotropic updates and cost more
-CPU time.
+`stencil_radius` is retained for compatibility with older examples. The native
+solver uses a local 3-by-3 Eikonal stencil to avoid skipping intervening raster
+costs or barriers.

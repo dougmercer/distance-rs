@@ -1,4 +1,4 @@
-"""Ordered-upwind raster distance accumulation."""
+"""Raster distance accumulation with local Eikonal updates."""
 
 from importlib import import_module
 from typing import Any

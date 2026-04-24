@@ -10,7 +10,16 @@ pub(crate) struct BarrierMask {
 }
 
 impl BarrierMask {
-    pub(crate) fn new(rows: usize, cols: usize, valid: Vec<bool>, has_blocked_cells: bool) -> Self {
+    pub(crate) fn new(
+        rows: usize,
+        cols: usize,
+        mut valid: Vec<bool>,
+        has_blocked_cells: bool,
+    ) -> Self {
+        if has_blocked_cells {
+            connect_diagonal_barriers(rows, cols, &mut valid);
+        }
+        let has_blocked_cells = valid.iter().any(|cell| !*cell);
         let blocked_prefix = if has_blocked_cells {
             build_blocked_prefix(rows, cols, &valid)
         } else {
@@ -200,4 +209,36 @@ fn build_blocked_prefix(rows: usize, cols: usize, valid: &[bool]) -> Vec<usize> 
         }
     }
     prefix
+}
+
+fn connect_diagonal_barriers(rows: usize, cols: usize, valid: &mut [bool]) {
+    if rows < 2 || cols < 2 {
+        return;
+    }
+
+    let original = valid.to_vec();
+    let mut extra_blocked = vec![false; valid.len()];
+    for row in 0..rows - 1 {
+        for col in 0..cols - 1 {
+            let nw = row * cols + col;
+            let ne = nw + 1;
+            let sw = (row + 1) * cols + col;
+            let se = sw + 1;
+
+            if !original[nw] && !original[se] && original[ne] && original[sw] {
+                extra_blocked[ne] = true;
+                extra_blocked[sw] = true;
+            }
+            if !original[ne] && !original[sw] && original[nw] && original[se] {
+                extra_blocked[nw] = true;
+                extra_blocked[se] = true;
+            }
+        }
+    }
+
+    for (is_valid, should_block) in valid.iter_mut().zip(extra_blocked) {
+        if should_block {
+            *is_valid = false;
+        }
+    }
 }

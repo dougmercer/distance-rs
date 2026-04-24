@@ -129,7 +129,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--search-radius",
         type=float,
         default=60.0,
-        help="Ordered-upwind search radius in meters.",
+        help="Compatibility search radius in meters; the native solver uses a local 3x3 stencil.",
     )
     parser.add_argument(
         "--cutoff-degrees",

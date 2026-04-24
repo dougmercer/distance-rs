@@ -36,24 +36,19 @@ impl Grid {
         cols: usize,
         cell_size_x: f64,
         cell_size_y: f64,
-        search_radius: f64,
+        _search_radius: f64,
     ) -> Self {
-        let radius_rows = (search_radius / cell_size_y).ceil().max(1.0) as isize;
-        let radius_cols = (search_radius / cell_size_x).ceil().max(1.0) as isize;
-        let search_radius_sq = search_radius * search_radius;
+        let search_radius_sq = cell_size_x.hypot(cell_size_y).powi(2);
         let mut stencil_offsets = Vec::new();
-        for dr in -radius_rows..=radius_rows {
-            for dc in -radius_cols..=radius_cols {
+        for dr in -1..=1 {
+            for dc in -1..=1 {
                 let dx = dc as f64 * cell_size_x;
                 let dy = dr as f64 * cell_size_y;
-                let distance_sq = dx * dx + dy * dy;
-                if distance_sq <= search_radius_sq + EPS {
-                    stencil_offsets.push(StencilOffset {
-                        dr,
-                        dc,
-                        distance: distance_sq.sqrt(),
-                    });
-                }
+                stencil_offsets.push(StencilOffset {
+                    dr,
+                    dc,
+                    distance: dx.hypot(dy),
+                });
             }
         }
 

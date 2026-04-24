@@ -215,7 +215,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--stencil-radius",
         type=float,
         default=30.0,
-        help="Ordered-upwind solver stencil radius in meters.",
+        help="Compatibility stencil radius in meters; the native solver uses a local 3x3 stencil.",
     )
     parser.add_argument(
         "--baseline-speed",

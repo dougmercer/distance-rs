@@ -211,7 +211,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--search-radius",
         type=float,
         default=4.0,
-        help="Ordered-upwind search radius in map units.",
+        help="Compatibility search radius in map units; the native solver uses a local 3x3 stencil.",
     )
     parser.add_argument("--json", type=Path, help="Optional JSON output path.")
     parser.add_argument(
