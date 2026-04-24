@@ -13,6 +13,16 @@ from . import _native
 Cell = tuple[int, int]
 
 
+_VERTICAL_FACTOR_OPTION_NAMES = (
+    "zero_factor",
+    "low_cut_angle",
+    "high_cut_angle",
+    "slope",
+    "power",
+    "cos_power",
+    "sec_power",
+)
+
 _ALIASES = {
     "binary": "binary",
     "linear": "linear",
@@ -176,15 +186,7 @@ class VerticalFactor:
         if isinstance(value, Mapping):
             data = dict(value)
             kind = data.pop("type", data.pop("kind", data.pop("name", "none")))
-            valid_keys = {
-                "zero_factor",
-                "low_cut_angle",
-                "high_cut_angle",
-                "slope",
-                "power",
-                "cos_power",
-                "sec_power",
-            }
+            valid_keys = set(_VERTICAL_FACTOR_OPTION_NAMES)
             unknown = set(data) - valid_keys
             if unknown:
                 joined = ", ".join(sorted(unknown))
@@ -202,19 +204,8 @@ class VerticalFactor:
     def _resolved_options(self, kind: str) -> dict[str, float]:
         defaults = _DEFAULTS[kind]
         options = {
-            "zero_factor": defaults["zero_factor"]
-            if self.zero_factor is None
-            else float(self.zero_factor),
-            "low_cut_angle": defaults["low_cut_angle"]
-            if self.low_cut_angle is None
-            else float(self.low_cut_angle),
-            "high_cut_angle": defaults["high_cut_angle"]
-            if self.high_cut_angle is None
-            else float(self.high_cut_angle),
-            "slope": defaults["slope"] if self.slope is None else float(self.slope),
-            "power": defaults["power"] if self.power is None else float(self.power),
-            "cos_power": defaults["cos_power"] if self.cos_power is None else float(self.cos_power),
-            "sec_power": defaults["sec_power"] if self.sec_power is None else float(self.sec_power),
+            name: defaults[name] if getattr(self, name) is None else float(getattr(self, name))
+            for name in _VERTICAL_FACTOR_OPTION_NAMES
         }
         for option_name, option_value in options.items():
             if not math.isfinite(option_value):
@@ -222,6 +213,66 @@ class VerticalFactor:
         if options["low_cut_angle"] >= options["high_cut_angle"]:
             raise ValueError("low_cut_angle must be less than high_cut_angle")
         return options
+
+    def as_native(self) -> dict[str, float | str]:
+        vf = self.normalized()
+        return {
+            "type": vf.type,
+            **{name: getattr(vf, name) for name in _VERTICAL_FACTOR_OPTION_NAMES},
+        }
+
+    def factor(self, angle_degrees: float) -> float:
+        vf = self if self._is_resolved() else self.normalized()
+        if vf.type == "none":
+            return 1.0
+        if (
+            not math.isfinite(angle_degrees)
+            or angle_degrees <= vf.low_cut_angle
+            or angle_degrees >= vf.high_cut_angle
+        ):
+            return math.inf
+
+        if vf.type == "binary":
+            value = vf.zero_factor
+        elif vf.type in {"linear", "inverse_linear"}:
+            value = vf.zero_factor + vf.slope * angle_degrees
+        elif vf.type in {"symmetric_linear", "symmetric_inverse_linear"}:
+            value = vf.zero_factor + vf.slope * abs(angle_degrees)
+        elif vf.type == "cos":
+            value = math.cos(math.radians(angle_degrees)) ** vf.power
+        elif vf.type == "sec":
+            value = 1.0 / (math.cos(math.radians(angle_degrees)) ** vf.power)
+        elif vf.type == "cos_sec":
+            value = (
+                math.cos(math.radians(angle_degrees)) ** vf.cos_power
+                if angle_degrees < 0.0
+                else 1.0 / (math.cos(math.radians(angle_degrees)) ** vf.sec_power)
+            )
+        elif vf.type == "sec_cos":
+            value = (
+                1.0 / (math.cos(math.radians(angle_degrees)) ** vf.sec_power)
+                if angle_degrees < 0.0
+                else math.cos(math.radians(angle_degrees)) ** vf.cos_power
+            )
+        elif vf.type == "hiking_time":
+            value = _hiking_pace(angle_degrees)
+        elif vf.type == "bidir_hiking_time":
+            value = 0.5 * (_hiking_pace(angle_degrees) + _hiking_pace(-angle_degrees))
+        else:
+            raise ValueError(f"unsupported vertical factor: {vf.type}")
+
+        return value if math.isfinite(value) and value > 0.0 else math.inf
+
+    def _is_resolved(self) -> bool:
+        return self.type in _DEFAULTS and all(
+            getattr(self, name) is not None for name in _VERTICAL_FACTOR_OPTION_NAMES
+        )
+
+
+def _hiking_pace(angle_degrees: float) -> float:
+    slope = math.tan(math.radians(angle_degrees))
+    speed_km_per_hour = 6.0 * math.exp(-3.5 * abs(slope + 0.05))
+    return 1.0 / (speed_km_per_hour * 1000.0)
 
 
 @dataclass(frozen=True)
@@ -315,14 +366,7 @@ def distance_accumulation(
         elevation_arr,
         barrier_arr,
         options.use_surface_distance,
-        vf.type,
-        vf.zero_factor,
-        vf.low_cut_angle,
-        vf.high_cut_angle,
-        vf.slope,
-        vf.power,
-        vf.cos_power,
-        vf.sec_power,
+        vf.as_native(),
         cell_size_x,
         cell_size_y,
     )

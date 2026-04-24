@@ -205,59 +205,10 @@ def transition_cost(
         math.hypot(plan_distance, dz) if has_elevation and use_surface_distance else plan_distance
     )
     angle = math.degrees(math.atan2(dz, plan_distance)) if has_elevation else 0.0
-    vf = vertical_factor_multiplier(vertical_factor, angle)
+    vf = vertical_factor.factor(angle)
     if not math.isfinite(vf):
         return math.inf
     return surface_distance * 0.5 * (float(cost[row, col]) + float(cost[next_row, next_col])) * vf
-
-
-def vertical_factor_multiplier(vertical_factor: VerticalFactor, angle_degrees: float) -> float:
-    vf = vertical_factor.normalized()
-    if vf.type == "none":
-        return 1.0
-    if (
-        not math.isfinite(angle_degrees)
-        or angle_degrees <= vf.low_cut_angle
-        or angle_degrees >= vf.high_cut_angle
-    ):
-        return math.inf
-
-    if vf.type == "binary":
-        value = vf.zero_factor
-    elif vf.type in {"linear", "inverse_linear"}:
-        value = vf.zero_factor + vf.slope * angle_degrees
-    elif vf.type in {"symmetric_linear", "symmetric_inverse_linear"}:
-        value = vf.zero_factor + vf.slope * abs(angle_degrees)
-    elif vf.type == "cos":
-        value = math.cos(math.radians(angle_degrees)) ** vf.power
-    elif vf.type == "sec":
-        value = 1.0 / (math.cos(math.radians(angle_degrees)) ** vf.power)
-    elif vf.type == "cos_sec":
-        value = (
-            math.cos(math.radians(angle_degrees)) ** vf.cos_power
-            if angle_degrees < 0.0
-            else 1.0 / (math.cos(math.radians(angle_degrees)) ** vf.sec_power)
-        )
-    elif vf.type == "sec_cos":
-        value = (
-            1.0 / (math.cos(math.radians(angle_degrees)) ** vf.sec_power)
-            if angle_degrees < 0.0
-            else math.cos(math.radians(angle_degrees)) ** vf.cos_power
-        )
-    elif vf.type == "hiking_time":
-        value = hiking_pace(angle_degrees)
-    elif vf.type == "bidir_hiking_time":
-        value = 0.5 * (hiking_pace(angle_degrees) + hiking_pace(-angle_degrees))
-    else:
-        raise ValueError(f"unsupported vertical factor: {vf.type}")
-
-    return value if math.isfinite(value) and value > 0.0 else math.inf
-
-
-def hiking_pace(angle_degrees: float) -> float:
-    slope = math.tan(math.radians(angle_degrees))
-    speed_km_per_hour = 6.0 * math.exp(-3.5 * abs(slope + 0.05))
-    return 1.0 / (speed_km_per_hour * 1000.0)
 
 
 def compare_distances(

@@ -7,7 +7,7 @@ use pyo3::types::PyDict;
 use crate::grid::MIN_COST;
 use crate::path::{trace_optimal_path, PathTraceError, TraceRequest};
 use crate::solver::{Solver, SolverInput, SolverOptions};
-use crate::vertical::{VerticalFactor, VerticalFactorKind};
+use crate::vertical::VerticalFactor;
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
@@ -18,14 +18,7 @@ fn distance_accumulation<'py>(
     elevation: Option<PyReadonlyArray2<'py, f64>>,
     barriers: Option<PyReadonlyArray2<'py, bool>>,
     use_surface_distance: bool,
-    vf_kind: &str,
-    zero_factor: f64,
-    low_cut_angle: f64,
-    high_cut_angle: f64,
-    slope: f64,
-    power: f64,
-    cos_power: f64,
-    sec_power: f64,
+    vertical_factor: &Bound<'py, PyDict>,
     cell_size_x: f64,
     cell_size_y: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -74,34 +67,7 @@ fn distance_accumulation<'py>(
             "cell sizes must be positive finite values",
         ));
     }
-    if !zero_factor.is_finite()
-        || !low_cut_angle.is_finite()
-        || !high_cut_angle.is_finite()
-        || !slope.is_finite()
-        || !power.is_finite()
-        || !cos_power.is_finite()
-        || !sec_power.is_finite()
-    {
-        return Err(PyValueError::new_err(
-            "vertical factor parameters must be finite",
-        ));
-    }
-    if low_cut_angle >= high_cut_angle {
-        return Err(PyValueError::new_err(
-            "low_cut_angle must be less than high_cut_angle",
-        ));
-    }
-
-    let vf = VerticalFactor {
-        kind: VerticalFactorKind::parse(vf_kind)?,
-        zero_factor,
-        low_cut_angle,
-        high_cut_angle,
-        slope,
-        power,
-        cos_power,
-        sec_power,
-    };
+    let vf = VerticalFactor::from_py_dict(vertical_factor)?;
 
     let mut cost = Vec::with_capacity(rows * cols);
     let mut elev = if has_elevation {

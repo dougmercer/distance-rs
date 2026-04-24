@@ -1,5 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VerticalFactorKind {
@@ -52,6 +53,26 @@ pub(crate) struct VerticalFactor {
 }
 
 impl VerticalFactor {
+    pub(crate) fn from_py_dict(value: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let kind = required_string(value, "type")?;
+        let vf = Self {
+            kind: VerticalFactorKind::parse(&kind)?,
+            zero_factor: required_f64(value, "zero_factor")?,
+            low_cut_angle: required_f64(value, "low_cut_angle")?,
+            high_cut_angle: required_f64(value, "high_cut_angle")?,
+            slope: required_f64(value, "slope")?,
+            power: required_f64(value, "power")?,
+            cos_power: required_f64(value, "cos_power")?,
+            sec_power: required_f64(value, "sec_power")?,
+        };
+        if vf.low_cut_angle >= vf.high_cut_angle {
+            return Err(PyValueError::new_err(
+                "low_cut_angle must be less than high_cut_angle",
+            ));
+        }
+        Ok(vf)
+    }
+
     pub(crate) fn factor(&self, angle_degrees: f64) -> f64 {
         if self.kind == VerticalFactorKind::None {
             return 1.0;
@@ -101,6 +122,31 @@ impl VerticalFactor {
         } else {
             f64::INFINITY
         }
+    }
+}
+
+fn required_string(value: &Bound<'_, PyDict>, name: &str) -> PyResult<String> {
+    let Some(item) = value.get_item(name)? else {
+        return Err(PyValueError::new_err(format!(
+            "vertical factor missing {name}"
+        )));
+    };
+    item.extract()
+}
+
+fn required_f64(value: &Bound<'_, PyDict>, name: &str) -> PyResult<f64> {
+    let Some(item) = value.get_item(name)? else {
+        return Err(PyValueError::new_err(format!(
+            "vertical factor missing {name}"
+        )));
+    };
+    let number = item.extract::<f64>()?;
+    if number.is_finite() {
+        Ok(number)
+    } else {
+        Err(PyValueError::new_err(format!(
+            "vertical factor option {name} must be finite"
+        )))
     }
 }
 
