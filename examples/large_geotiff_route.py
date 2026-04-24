@@ -129,7 +129,6 @@ def main(argv: list[str] | None = None) -> None:
         grid=GridSpec(crs=CRS, margin=args.crop_buffer),
         solver=SolverOptions(
             vertical_factor=VERTICAL_FACTOR,
-            stencil_radius=args.stencil_radius,
         ),
         baseline_speed=args.baseline_speed,
     )
@@ -166,7 +165,6 @@ def main(argv: list[str] | None = None) -> None:
         size=args.size,
         cell_size=args.cell_size,
         crop_buffer=args.crop_buffer,
-        stencil_radius=args.stencil_radius,
         baseline_speed=args.baseline_speed,
         plot_path=plot_path,
     )
@@ -212,12 +210,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="GeoTIFF corridor buffer around each route leg in meters.",
     )
     parser.add_argument(
-        "--stencil-radius",
-        type=float,
-        default=30.0,
-        help="Compatibility stencil radius in meters; the native solver uses a local 3x3 stencil.",
-    )
-    parser.add_argument(
         "--baseline-speed",
         type=float,
         default=5.0,
@@ -241,8 +233,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--cell-size must be positive and less than 2 meters")
     if args.crop_buffer <= 0.0:
         parser.error("--crop-buffer must be positive")
-    if args.stencil_radius <= 0.0:
-        parser.error("--stencil-radius must be positive")
     if args.baseline_speed <= 0.0:
         parser.error("--baseline-speed must be positive")
     if args.max_plot_pixels < 10_000:
@@ -1017,7 +1007,6 @@ def write_summary(
     size: int,
     cell_size: float,
     crop_buffer: float,
-    stencil_radius: float,
     baseline_speed: float,
     plot_path: Path,
 ) -> None:
@@ -1029,7 +1018,6 @@ def write_summary(
                 "shape": [size, size],
                 "cell_size_m": cell_size,
                 "crop_buffer_m": crop_buffer,
-                "stencil_radius_m": stencil_radius,
                 "baseline_speed_kmh": baseline_speed,
                 "vertical_factor": VERTICAL_FACTOR,
                 "barrier_count": len(route_barriers(size, cell_size)),

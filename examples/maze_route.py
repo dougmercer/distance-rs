@@ -31,10 +31,7 @@ def main() -> int:
     ordered = distance_accumulation(
         RasterSurface(cost, barriers=barriers),
         source=source,
-        options=SolverOptions(
-            stencil_radius=args.search_radius,
-            use_surface_distance=False,
-        ),
+        options=SolverOptions(use_surface_distance=False),
     )
     ordered_line = optimal_path_as_line(ordered, destination)
     dijkstra = raster_dijkstra(
@@ -86,12 +83,6 @@ def parse_args() -> argparse.Namespace:
         help="Raster cells per logical maze cell or wall.",
     )
     parser.add_argument("--seed", type=int, default=11, help="Maze generation seed.")
-    parser.add_argument(
-        "--search-radius",
-        type=float,
-        default=7.0,
-        help="Compatibility search radius in cells; the native solver uses a local 3x3 stencil.",
-    )
     args = parser.parse_args()
 
     if args.maze_rows < 2:
@@ -100,8 +91,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--maze-cols must be at least 2")
     if args.scale < 3:
         parser.error("--scale must be at least 3")
-    if args.search_radius <= 0.0:
-        parser.error("--search-radius must be positive")
     return args
 
 

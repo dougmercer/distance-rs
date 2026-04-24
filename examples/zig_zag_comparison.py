@@ -81,10 +81,7 @@ def main() -> int:
     ordered = distance_accumulation(
         cost,
         source=source,
-        options=SolverOptions(
-            stencil_radius=args.search_radius,
-            use_surface_distance=False,
-        ),
+        options=SolverOptions(use_surface_distance=False),
     )
     dijkstra = raster_dijkstra(
         sources,
@@ -128,12 +125,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("results"),
         help="Directory for the comparison plot.",
-    )
-    parser.add_argument(
-        "--search-radius",
-        type=float,
-        default=23.0,
-        help="Compatibility search radius in cells; the native solver uses a local 3x3 stencil.",
     )
     return parser.parse_args()
 

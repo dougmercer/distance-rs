@@ -28,7 +28,6 @@ fn distance_accumulation<'py>(
     sec_power: f64,
     cell_size_x: f64,
     cell_size_y: f64,
-    search_radius: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
     let source_cells = source_cells.as_array();
     let cost_surface = cost_surface.as_array();
@@ -68,13 +67,11 @@ fn distance_accumulation<'py>(
     }
     if cell_size_x <= 0.0
         || cell_size_y <= 0.0
-        || search_radius <= 0.0
         || !cell_size_x.is_finite()
         || !cell_size_y.is_finite()
-        || !search_radius.is_finite()
     {
         return Err(PyValueError::new_err(
-            "cell sizes and search radius must be positive finite values",
+            "cell sizes must be positive finite values",
         ));
     }
     if !zero_factor.is_finite()
@@ -168,7 +165,6 @@ fn distance_accumulation<'py>(
             vf,
             cell_size_x,
             cell_size_y,
-            search_radius,
         },
     );
     let output = solver.solve(&sources_flat)?;

@@ -55,7 +55,6 @@ def test_barrier_blocks_cells() -> None:
     result = distance_accumulation(
         surface,
         source=(5, 2),
-        options=SolverOptions(stencil_radius=3.0),
     )
 
     assert math.isinf(result.distance[5, 5])
@@ -72,7 +71,6 @@ def test_binary_vertical_factor_blocks_upslope() -> None:
         source=(4, 4),
         options=SolverOptions(
             vertical_factor=VerticalFactor("binary", low_cut_angle=-90.0, high_cut_angle=0.1),
-            stencil_radius=3.0,
         ),
     )
 
@@ -82,9 +80,6 @@ def test_binary_vertical_factor_blocks_upslope() -> None:
 
 def test_distance_accumulation_rejects_non_finite_numeric_options() -> None:
     cost = np.ones((3, 3), dtype=float)
-
-    with pytest.raises(ValueError, match="stencil_radius"):
-        distance_accumulation(cost, source=(1, 1), options=SolverOptions(stencil_radius=math.nan))
 
     with pytest.raises(ValueError, match="cell_size"):
         surface = RasterSurface(cost, grid=RasterGrid(cell_size=math.nan))
@@ -122,7 +117,7 @@ def test_optimal_path_as_line_traces_back_direction_without_zig_zag() -> None:
     result = distance_accumulation(
         np.ones((121, 151), dtype=float),
         source=source,
-        options=SolverOptions(stencil_radius=23.0, use_surface_distance=False),
+        options=SolverOptions(use_surface_distance=False),
     )
 
     line = optimal_path_as_line(result, destination)

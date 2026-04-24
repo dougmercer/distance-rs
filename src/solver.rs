@@ -105,7 +105,6 @@ pub(crate) struct SolverOptions {
     pub(crate) vf: VerticalFactor,
     pub(crate) cell_size_x: f64,
     pub(crate) cell_size_y: f64,
-    pub(crate) search_radius: f64,
 }
 
 pub(crate) struct SolveOutput {
@@ -124,7 +123,6 @@ impl Solver {
             input.cols,
             options.cell_size_x,
             options.cell_size_y,
-            options.search_radius,
         );
         let n = input.rows * input.cols;
         let barriers =

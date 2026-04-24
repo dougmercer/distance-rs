@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"running {solver}", file=sys.stderr)
         try:
             if solver == "ordered_upwind":
-                results.append(run_ordered_upwind(case, search_radius=args.search_radius))
+                results.append(run_ordered_upwind(case))
             elif solver == "raster_dijkstra":
                 results.append(run_raster_dijkstra(case))
             elif solver == "whitebox_cost_distance":
@@ -126,12 +126,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--cols", type=int, default=181, help="Raster width in cells.")
     parser.add_argument("--cell-size", type=float, default=10.0, help="Cell size in meters.")
     parser.add_argument(
-        "--search-radius",
-        type=float,
-        default=60.0,
-        help="Compatibility search radius in meters; the native solver uses a local 3x3 stencil.",
-    )
-    parser.add_argument(
         "--cutoff-degrees",
         type=float,
         default=14.0,
@@ -157,8 +151,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--cols must be at least 81")
     if args.cell_size <= 0.0 or not math.isfinite(args.cell_size):
         parser.error("--cell-size must be a positive finite value")
-    if args.search_radius <= 0.0 or not math.isfinite(args.search_radius):
-        parser.error("--search-radius must be a positive finite value")
     if not 0.0 < args.cutoff_degrees < 89.0:
         parser.error("--cutoff-degrees must be between 0 and 89")
     return args
@@ -228,7 +220,7 @@ def make_case(*, rows: int, cols: int, cell_size: float, cutoff_degrees: float) 
     )
 
 
-def run_ordered_upwind(case: CaseData, *, search_radius: float) -> RouteResult:
+def run_ordered_upwind(case: CaseData) -> RouteResult:
     start = time.perf_counter()
     result = distance_accumulation(
         RasterSurface(
@@ -240,7 +232,6 @@ def run_ordered_upwind(case: CaseData, *, search_radius: float) -> RouteResult:
         source=source_cells(case.sources),
         options=SolverOptions(
             vertical_factor=case.vertical_factor,
-            stencil_radius=search_radius,
             use_surface_distance=True,
         ),
     )
@@ -507,7 +498,6 @@ def write_metadata(
             "steep_cells": int(np.count_nonzero(too_steep_mask(case))),
         },
         "parameters": {
-            "search_radius_m": args.search_radius,
             "cutoff_degrees": args.cutoff_degrees,
         },
         "outputs": {"plot": str(plot_path)},

@@ -16,7 +16,6 @@ from distance_rs import (
     GeoBarriers,
     GeoPoints,
     GridSpec,
-    SolverOptions,
     load_points,
     load_surface,
     route_path,
@@ -137,7 +136,6 @@ def test_route_path_crops_to_margin_and_forwards_solver_options(tmp_path: Path) 
         land_use_path,
         GeoPoints(LineString([(105.0, 895.0), (305.0, 795.0)]), crs="EPSG:3857"),
         grid=GridSpec(margin=25.0),
-        solver=SolverOptions(stencil_radius=40.0),
     )
 
     leg = route.legs[0]
@@ -221,7 +219,6 @@ def test_route_path_stitches_waypoint_legs_and_metrics(tmp_path: Path) -> None:
         cost_path,
         GeoPoints([(5.0, 295.0), (145.0, 155.0), (245.0, 55.0)], crs="EPSG:3857"),
         grid=GridSpec(margin=40.0),
-        solver=SolverOptions(stencil_radius=40.0),
         baseline_speed=5.0,
     )
 

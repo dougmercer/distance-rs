@@ -105,7 +105,6 @@ def main(argv: list[str] | None = None) -> int:
                         source=source_cells(case.sources),
                         options=SolverOptions(
                             vertical_factor=case.vertical_factor,
-                            stencil_radius=args.search_radius,
                             use_surface_distance=case.use_surface_distance,
                         ),
                     ).distance
@@ -154,7 +153,6 @@ def main(argv: list[str] | None = None) -> int:
                 "case": case.name,
                 "description": case.description,
                 "size": size,
-                "search_radius": args.search_radius,
                 "ordered_upwind_times_sec": ours.times_sec,
                 "ordered_upwind_median_sec": ours.median_sec,
                 "baselines": baselines,
@@ -207,12 +205,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=[RASTER_BASELINE],
         help="Baselines to run: raster, whitebox, or all.",
     )
-    parser.add_argument(
-        "--search-radius",
-        type=float,
-        default=4.0,
-        help="Compatibility search radius in map units; the native solver uses a local 3x3 stencil.",
-    )
     parser.add_argument("--json", type=Path, help="Optional JSON output path.")
     parser.add_argument(
         "--max-rmse",
@@ -231,8 +223,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--repeats must be at least 1")
     if args.warmups < 0:
         parser.error("--warmups must be nonnegative")
-    if args.search_radius <= 0.0:
-        parser.error("--search-radius must be positive")
     if any(size < 3 for size in args.sizes):
         parser.error("--sizes values must be at least 3")
     if (

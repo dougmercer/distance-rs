@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"running {solver}", file=sys.stderr)
         try:
             if solver == "ordered_upwind":
-                results.append(run_ordered_upwind(case, destination, args.search_radius))
+                results.append(run_ordered_upwind(case, destination))
             elif solver == "raster_dijkstra":
                 results.append(run_raster_dijkstra(case, destination))
             elif solver == "whitebox_cost_distance":
@@ -144,12 +144,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--cell-size", type=float, default=1.0, help="Cell size in meters.")
     parser.add_argument(
-        "--search-radius",
-        type=float,
-        default=3.0,
-        help="Compatibility search radius in meters; the native solver uses a local 3x3 stencil.",
-    )
-    parser.add_argument(
         "--solvers",
         nargs="+",
         default=["all"],
@@ -175,8 +169,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--width-m must be positive")
     if args.cell_size <= 0.0:
         parser.error("--cell-size must be positive")
-    if args.search_radius <= 0.0:
-        parser.error("--search-radius must be positive")
     if args.max_plot_cells < 10_000:
         parser.error("--max-plot-cells must be at least 10000")
     return args
@@ -293,7 +285,6 @@ def make_five_mile_case(
 def run_ordered_upwind(
     case: CaseData,
     destination: tuple[int, int],
-    search_radius: float,
 ) -> RouteResult:
     origin = origin_for_case(case)
     start = time.perf_counter()
@@ -307,7 +298,6 @@ def run_ordered_upwind(
         source=source_cells(case.sources),
         options=SolverOptions(
             vertical_factor=case.vertical_factor,
-            stencil_radius=search_radius,
             use_surface_distance=False,
         ),
     )

@@ -50,7 +50,6 @@ mod tests {
                 vf: flat_vf(),
                 cell_size_x: 1.0,
                 cell_size_y: 1.0,
-                search_radius: 4.0,
             },
         );
 
@@ -75,7 +74,6 @@ mod tests {
                 vf: flat_vf(),
                 cell_size_x: 1.0,
                 cell_size_y: 1.0,
-                search_radius: 4.0,
             },
         );
 
@@ -84,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn large_search_radius_does_not_jump_over_high_cost_cells() {
+    fn local_stencil_does_not_jump_over_high_cost_cells() {
         let rows = 5;
         let cols = 7;
         let mut cost = vec![1.0; rows * cols];
@@ -106,7 +104,6 @@ mod tests {
                 vf: flat_vf(),
                 cell_size_x: 1.0,
                 cell_size_y: 1.0,
-                search_radius: 4.0,
             },
         );
 

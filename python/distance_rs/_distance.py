@@ -249,14 +249,9 @@ class RasterSurface:
 
 @dataclass(frozen=True)
 class SolverOptions:
-    """Numerical options for distance accumulation.
-
-    `stencil_radius` is retained for compatibility with earlier releases. The
-    native solver uses an Esri-style local 3-by-3 Eikonal stencil.
-    """
+    """Numerical options for distance accumulation."""
 
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None
-    stencil_radius: float | None = None
     use_surface_distance: bool = True
 
 
@@ -270,7 +265,6 @@ class DistanceAccumulationResult:
     cell_size: tuple[float, float]
     origin: tuple[float, float]
     vertical_factor: VerticalFactor
-    stencil_radius: float
 
     def optimal_path_as_line(
         self,
@@ -312,13 +306,6 @@ def distance_accumulation(
     source_cells = _normalize_source_cells(source, cost_arr.shape)
 
     cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
-    if options.stencil_radius is None:
-        stencil_radius_value = 4.0 * max(cell_size_x, cell_size_y)
-    else:
-        stencil_radius_value = float(options.stencil_radius)
-    if stencil_radius_value <= 0.0 or not math.isfinite(stencil_radius_value):
-        raise ValueError("stencil_radius must be a positive finite value")
-
     vf = VerticalFactor.from_any(options.vertical_factor)
     origin_x, origin_y = _normalize_origin(surface.grid.origin)
 
@@ -338,7 +325,6 @@ def distance_accumulation(
         vf.sec_power,
         cell_size_x,
         cell_size_y,
-        stencil_radius_value,
     )
 
     return DistanceAccumulationResult(
@@ -350,7 +336,6 @@ def distance_accumulation(
         cell_size=(cell_size_x, cell_size_y),
         origin=(origin_x, origin_y),
         vertical_factor=vf,
-        stencil_radius=stencil_radius_value,
     )
 
 

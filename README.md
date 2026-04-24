@@ -184,10 +184,7 @@ route = route_path(
     barriers=GeoBarriers("barriers.geojson"),
     elevation="elevation.tif",
     grid=GridSpec(margin=250.0),
-    solver=SolverOptions(
-        vertical_factor="bidir_hiking_time",
-        stencil_radius=80.0,
-    ),
+    solver=SolverOptions(vertical_factor="bidir_hiking_time"),
     baseline_speed=5.0,
 )
 
@@ -201,9 +198,8 @@ overridden by `GridSpec`. Vector files infer CRS from file metadata; GeoJSON
 defaults to `EPSG:4326`. Plain coordinate lists and Shapely geometries must be
 wrapped in `GeoPoints(..., crs=...)` or `GeoBarriers(..., crs=...)`. `margin`
 crops each route leg to the start/end bounding box plus that many map units,
-snapped to the cost raster grid. `stencil_radius` is retained for API
-compatibility; the native solver now uses a local 3-by-3 Eikonal stencil for
-ArcGIS-style behavior.
+snapped to the cost raster grid. The native solver uses a local 3-by-3 Eikonal
+stencil for ArcGIS-style behavior.
 
 To exercise the cropped GeoTIFF path on large local files, generate synthetic
 8000 x 8000 rasters at 1.5 meter resolution, route across a small corridor, and
@@ -247,15 +243,11 @@ surface = RasterSurface(
 result = distance_accumulation(
     surface,
     source=(50, 50),
-    options=SolverOptions(
-        vertical_factor={"type": "bidir_hiking_time"},
-        stencil_radius=6.0,
-    ),
+    options=SolverOptions(vertical_factor={"type": "bidir_hiking_time"}),
 )
 
 line = optimal_path_as_line(result, destination=(90, 90))
 ```
 
-`stencil_radius` is retained for compatibility with older examples. The native
-solver uses a local 3-by-3 Eikonal stencil to avoid skipping intervening raster
-costs or barriers.
+The native solver uses a local 3-by-3 Eikonal stencil to avoid skipping
+intervening raster costs or barriers.
