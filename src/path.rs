@@ -60,6 +60,64 @@ pub(crate) struct TraceRequest<'a> {
     pub(crate) max_steps: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TracePoint {
+    row: f64,
+    col: f64,
+}
+
+impl TracePoint {
+    fn at_cell_center(row: usize, col: usize) -> Self {
+        Self {
+            row: row as f64,
+            col: col as f64,
+        }
+    }
+
+    fn is_near(self, other: Self) -> bool {
+        (self.row - other.row).abs() <= 1.0e-7 && (self.col - other.col).abs() <= 1.0e-7
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TraceCursor {
+    point: TracePoint,
+    rows: usize,
+    cols: usize,
+}
+
+impl TraceCursor {
+    fn new(row: isize, col: isize, rows: usize, cols: usize) -> Self {
+        Self {
+            point: TracePoint {
+                row: row as f64,
+                col: col as f64,
+            },
+            rows,
+            cols,
+        }
+    }
+
+    fn current_cell(self) -> Result<(usize, usize), PathTraceError> {
+        let row_idx = self.point.row.round() as isize;
+        let col_idx = self.point.col.round() as isize;
+        if row_idx < 0
+            || col_idx < 0
+            || row_idx >= self.rows as isize
+            || col_idx >= self.cols as isize
+        {
+            return Err(PathTraceError::Runtime(
+                "path tracing stepped outside the raster".to_string(),
+            ));
+        }
+        Ok((row_idx as usize, col_idx as usize))
+    }
+
+    fn move_to(&mut self, point: TracePoint) {
+        self.point = point;
+    }
+}
+
 pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, PathTraceError> {
     let shape = request.distance.shape();
     let rows = shape[0];
@@ -92,14 +150,12 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
         request.max_steps
     };
     let mut coords = Vec::with_capacity(step_limit.min(1024) * 2);
-    let mut row = request.start_row as f64;
-    let mut col = request.start_col as f64;
+    let mut cursor = TraceCursor::new(request.start_row, request.start_col, rows, cols);
     let mut guard = 0usize;
 
-    push_coord(
+    push_world_coord(
         &mut coords,
-        row,
-        col,
+        cursor.point,
         request.cell_size_x,
         request.cell_size_y,
         request.origin_x,
@@ -107,22 +163,18 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
     );
 
     loop {
-        let current = nearest_cell_in_direction(row, col, 0.0, 0.0, rows, cols)?;
-        let current_row = current / cols;
-        let current_col = current % cols;
+        let (current_row, current_col) = cursor.current_cell()?;
         if !request.distance[[current_row, current_col]].is_finite() {
             return Err(path_trace_error("entered a non-finite cell"));
         }
 
         let a = request.parent_a[[current_row, current_col]];
         if a < 0 {
-            if (row - current_row as f64).abs() > 1.0e-7
-                || (col - current_col as f64).abs() > 1.0e-7
-            {
-                push_coord(
+            let source_center = TracePoint::at_cell_center(current_row, current_col);
+            if !cursor.point.is_near(source_center) {
+                push_world_coord(
                     &mut coords,
-                    current_row as f64,
-                    current_col as f64,
+                    source_center,
                     request.cell_size_x,
                     request.cell_size_y,
                     request.origin_x,
@@ -136,50 +188,19 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
         if !degrees.is_finite() {
             return Err(path_trace_error("encountered a non-finite direction"));
         }
-        let (dr, dc) = direction_vector(degrees, request.cell_size_x, request.cell_size_y);
-        if dr.abs() <= 1.0e-12 && dc.abs() <= 1.0e-12 {
-            return Err(path_trace_error("encountered a zero direction"));
-        }
+        let previous = cursor.point;
+        let proposed = next_trace_step(&cursor, degrees, request.cell_size_x, request.cell_size_y)?;
+        let repaired = repair_blocked_step(
+            &request.distance,
+            previous,
+            proposed,
+            TracePoint::at_cell_center(current_row, current_col),
+        )?;
+        cursor.move_to(repaired);
 
-        let previous_row = row;
-        let previous_col = col;
-        let t = next_lattice_crossing(row, col, dr, dc)?;
-        row += dr * t;
-        col += dc * t;
-
-        if row < -1.0e-7
-            || col < -1.0e-7
-            || row > (rows - 1) as f64 + 1.0e-7
-            || col > (cols - 1) as f64 + 1.0e-7
-        {
-            return Err(path_trace_error("stepped outside the raster"));
-        }
-        row = row.clamp(0.0, (rows - 1) as f64);
-        col = col.clamp(0.0, (cols - 1) as f64);
-        if !finite_segment_clear(&request.distance, previous_row, previous_col, row, col) {
-            let center_row = current_row as f64;
-            let center_col = current_col as f64;
-            if ((previous_row - center_row).abs() > 1.0e-7
-                || (previous_col - center_col).abs() > 1.0e-7)
-                && finite_segment_clear(
-                    &request.distance,
-                    previous_row,
-                    previous_col,
-                    center_row,
-                    center_col,
-                )
-            {
-                row = center_row;
-                col = center_col;
-            } else {
-                return Err(path_trace_error("crossed a non-finite cell"));
-            }
-        }
-
-        push_coord(
+        push_world_coord(
             &mut coords,
-            row,
-            col,
+            cursor.point,
             request.cell_size_x,
             request.cell_size_y,
             request.origin_x,
@@ -199,6 +220,52 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
 
 fn path_trace_error(reason: &str) -> PathTraceError {
     PathTraceError::Runtime(format!("path tracing {reason}"))
+}
+
+fn next_trace_step(
+    cursor: &TraceCursor,
+    degrees: f64,
+    cell_size_x: f64,
+    cell_size_y: f64,
+) -> Result<TracePoint, PathTraceError> {
+    let (dr, dc) = direction_vector(degrees, cell_size_x, cell_size_y);
+    if dr.abs() <= 1.0e-12 && dc.abs() <= 1.0e-12 {
+        return Err(path_trace_error("encountered a zero direction"));
+    }
+
+    let t = next_lattice_crossing(cursor.point.row, cursor.point.col, dr, dc)?;
+    let mut next = TracePoint {
+        row: cursor.point.row + dr * t,
+        col: cursor.point.col + dc * t,
+    };
+
+    if next.row < -1.0e-7
+        || next.col < -1.0e-7
+        || next.row > (cursor.rows - 1) as f64 + 1.0e-7
+        || next.col > (cursor.cols - 1) as f64 + 1.0e-7
+    {
+        return Err(path_trace_error("stepped outside the raster"));
+    }
+
+    next.row = next.row.clamp(0.0, (cursor.rows - 1) as f64);
+    next.col = next.col.clamp(0.0, (cursor.cols - 1) as f64);
+    Ok(next)
+}
+
+fn repair_blocked_step(
+    distance: &ArrayView2<'_, f64>,
+    previous: TracePoint,
+    proposed: TracePoint,
+    current_center: TracePoint,
+) -> Result<TracePoint, PathTraceError> {
+    if finite_segment_clear(distance, previous, proposed) {
+        return Ok(proposed);
+    }
+    if !previous.is_near(current_center) && finite_segment_clear(distance, previous, current_center)
+    {
+        return Ok(current_center);
+    }
+    Err(path_trace_error("crossed a non-finite cell"))
 }
 
 fn direction_vector(degrees: f64, cell_size_x: f64, cell_size_y: f64) -> (f64, f64) {
@@ -235,48 +302,31 @@ fn next_axis_crossing(value: f64, delta: f64) -> f64 {
     (target - value) / delta
 }
 
-fn nearest_cell_in_direction(
-    row: f64,
-    col: f64,
-    dr: f64,
-    dc: f64,
-    rows: usize,
-    cols: usize,
-) -> Result<usize, PathTraceError> {
-    let sample_row = row + dr * 1.0e-7;
-    let sample_col = col + dc * 1.0e-7;
-    let row_idx = sample_row.round() as isize;
-    let col_idx = sample_col.round() as isize;
-    if row_idx < 0 || col_idx < 0 || row_idx >= rows as isize || col_idx >= cols as isize {
-        return Err(PathTraceError::Runtime(
-            "path tracing stepped outside the raster".to_string(),
-        ));
-    }
-    Ok(row_idx as usize * cols + col_idx as usize)
-}
-
 fn finite_segment_clear(
     distance: &ArrayView2<'_, f64>,
-    row0: f64,
-    col0: f64,
-    row1: f64,
-    col1: f64,
+    start: TracePoint,
+    end: TracePoint,
 ) -> bool {
     let shape = distance.shape();
-    grid_segment::segment_clear(shape[0], shape[1], row0, col0, row1, col1, |row, col| {
-        distance[[row, col]].is_finite()
-    })
+    grid_segment::segment_clear(
+        shape[0],
+        shape[1],
+        start.row,
+        start.col,
+        end.row,
+        end.col,
+        |row, col| distance[[row, col]].is_finite(),
+    )
 }
 
-fn push_coord(
+fn push_world_coord(
     coords: &mut Vec<f64>,
-    row: f64,
-    col: f64,
+    point: TracePoint,
     cell_size_x: f64,
     cell_size_y: f64,
     origin_x: f64,
     origin_y: f64,
 ) {
-    coords.push(origin_x + col * cell_size_x);
-    coords.push(origin_y + row * cell_size_y);
+    coords.push(origin_x + point.col * cell_size_x);
+    coords.push(origin_y + point.row * cell_size_y);
 }
