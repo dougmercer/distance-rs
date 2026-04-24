@@ -1,5 +1,6 @@
 mod barriers;
 mod grid;
+mod grid_segment;
 mod path;
 mod python;
 mod solver;
