@@ -1,12 +1,5 @@
-use rayon::prelude::*;
-
 use crate::grid::{EPS, NEIGHBORS_8};
 use crate::solver::{HeapEntry, Parent, Solver, TRIAL};
-use crate::vertical::VerticalFactorKind;
-
-const PARALLEL_UPDATE_MIN_STENCIL: usize = 16;
-const PARALLEL_BLOCKED_FLAT_UPDATE_MIN_STENCIL: usize = 128;
-const PARALLEL_FLAT_UPDATE_MIN_STENCIL: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 struct CandidateUpdate {
@@ -207,71 +200,32 @@ impl<'a> SegmentContext<'a> {
 impl Solver {
     pub(crate) fn update_around_full(&mut self, center: usize) {
         let (center_row, center_col) = self.row_col(center);
-        if self.should_parallelize_update() {
-            let updates: Vec<CandidateUpdate> = self
-                .grid
-                .stencil_offsets
-                .par_iter()
-                .filter_map(|offset| {
-                    let idx = self.offset_idx(center_row, center_col, *offset)?;
-                    if !self.is_valid(idx) || self.is_accepted(idx) {
-                        return None;
-                    }
-                    self.compute_update(idx)
-                })
-                .collect();
-
-            for update in updates {
-                self.apply_update(update);
+        for offset_index in 0..self.grid.stencil_offsets.len() {
+            let offset = self.grid.stencil_offsets[offset_index];
+            let Some(idx) = self.offset_idx(center_row, center_col, offset) else {
+                continue;
+            };
+            if !self.is_valid(idx) || self.is_accepted(idx) {
+                continue;
             }
-        } else {
-            for offset_index in 0..self.grid.stencil_offsets.len() {
-                let offset = self.grid.stencil_offsets[offset_index];
-                let Some(idx) = self.offset_idx(center_row, center_col, offset) else {
-                    continue;
-                };
-                if !self.is_valid(idx) || self.is_accepted(idx) {
-                    continue;
-                }
-                if let Some(update) = self.compute_update(idx) {
-                    self.apply_update(update);
-                }
+            if let Some(update) = self.compute_update(idx) {
+                self.apply_update(update);
             }
         }
     }
 
     pub(crate) fn update_around_incremental(&mut self, center: usize) {
         let (center_row, center_col) = self.row_col(center);
-        if self.should_parallelize_update() {
-            let updates: Vec<CandidateUpdate> = self
-                .grid
-                .stencil_offsets
-                .par_iter()
-                .filter_map(|offset| {
-                    let idx = self.offset_idx(center_row, center_col, *offset)?;
-                    if !self.is_valid(idx) || self.is_accepted(idx) {
-                        return None;
-                    }
-                    self.compute_incremental_update(idx, center, offset.distance)
-                })
-                .collect();
-
-            for update in updates {
-                self.apply_update(update);
+        for offset_index in 0..self.grid.stencil_offsets.len() {
+            let offset = self.grid.stencil_offsets[offset_index];
+            let Some(idx) = self.offset_idx(center_row, center_col, offset) else {
+                continue;
+            };
+            if !self.is_valid(idx) || self.is_accepted(idx) {
+                continue;
             }
-        } else {
-            for offset_index in 0..self.grid.stencil_offsets.len() {
-                let offset = self.grid.stencil_offsets[offset_index];
-                let Some(idx) = self.offset_idx(center_row, center_col, offset) else {
-                    continue;
-                };
-                if !self.is_valid(idx) || self.is_accepted(idx) {
-                    continue;
-                }
-                if let Some(update) = self.compute_incremental_update(idx, center, offset.distance)
-                {
-                    self.apply_update(update);
-                }
+            if let Some(update) = self.compute_incremental_update(idx, center, offset.distance) {
+                self.apply_update(update);
             }
         }
     }
@@ -560,17 +514,6 @@ impl Solver {
         } else {
             0.0
         }
-    }
-
-    fn should_parallelize_update(&self) -> bool {
-        let min_stencil = if self.vf.kind != VerticalFactorKind::None {
-            PARALLEL_UPDATE_MIN_STENCIL
-        } else if self.barriers.has_blocked_cells() {
-            PARALLEL_BLOCKED_FLAT_UPDATE_MIN_STENCIL
-        } else {
-            PARALLEL_FLAT_UPDATE_MIN_STENCIL
-        };
-        self.grid.stencil_offsets.len() >= min_stencil && rayon::current_num_threads() > 1
     }
 
     fn apply_update(&mut self, update: CandidateUpdate) {
