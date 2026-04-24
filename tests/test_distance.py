@@ -125,6 +125,26 @@ def test_optimal_path_as_line_traces_back_direction_without_zig_zag() -> None:
     assert _path_area_from_straight_line(line, source, destination) < 50.0
 
 
+def test_optimal_path_as_line_repairs_invalid_direction_step_locally() -> None:
+    source, destination, cost, barriers = _make_maze_case(
+        maze_rows=11,
+        maze_cols=17,
+        scale=7,
+        seed=11,
+    )
+    result = distance_accumulation(
+        RasterSurface(cost, barriers=barriers),
+        source=source,
+        options=SolverOptions(use_surface_distance=False),
+    )
+
+    line = optimal_path_as_line(result, destination)
+
+    assert line.shape[1] == 2
+    assert math.isfinite(result.distance[destination])
+    assert _polyline_length(line) < 520.0
+
+
 def test_raster_dijkstra_baseline_returns_distance_and_traceable_parent() -> None:
     sources = np.zeros((9, 9), dtype=bool)
     sources[4, 1] = True
@@ -164,3 +184,76 @@ def _path_area_from_straight_line(
     progress = progress[order]
     cross_track = cross_track[order]
     return float(np.sum(0.5 * np.diff(progress) * (cross_track[:-1] + cross_track[1:])))
+
+
+def _polyline_length(line: np.ndarray) -> float:
+    if len(line) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
+
+
+def _make_maze_case(
+    *,
+    maze_rows: int,
+    maze_cols: int,
+    scale: int,
+    seed: int,
+) -> tuple[tuple[int, int], tuple[int, int], np.ndarray, np.ndarray]:
+    maze = _carve_perfect_maze(maze_rows, maze_cols, seed)
+    barriers = np.kron(maze, np.ones((scale, scale), dtype=np.bool_))
+
+    rows, cols = barriers.shape
+    y, x = np.mgrid[:rows, :cols]
+    corridor = ~barriers
+    center_pull = 0.08 * np.cos(2.0 * math.pi * y / max(rows, 1))
+    east_penalty = 0.10 * x / max(cols - 1, 1)
+    cost = 1.0 + center_pull + east_penalty
+    cost = np.where(corridor, cost, np.inf).astype(np.float64)
+
+    source = _logical_maze_cell_center(0, 0, scale)
+    destination = _logical_maze_cell_center(maze_rows - 1, maze_cols - 1, scale)
+    _clear_endpoint(barriers, cost, source)
+    _clear_endpoint(barriers, cost, destination)
+    return source, destination, cost, barriers
+
+
+def _carve_perfect_maze(rows: int, cols: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    maze = np.ones((2 * rows + 1, 2 * cols + 1), dtype=np.bool_)
+    visited = np.zeros((rows, cols), dtype=np.bool_)
+    stack = [(0, 0)]
+    visited[0, 0] = True
+    maze[1, 1] = False
+
+    while stack:
+        row, col = stack[-1]
+        neighbors = []
+        for dr, dc in [(-1, 0), (0, 1), (1, 0), (0, -1)]:
+            next_row = row + dr
+            next_col = col + dc
+            if 0 <= next_row < rows and 0 <= next_col < cols and not visited[next_row, next_col]:
+                neighbors.append((dr, dc, next_row, next_col))
+
+        if not neighbors:
+            stack.pop()
+            continue
+
+        dr, dc, next_row, next_col = neighbors[int(rng.integers(len(neighbors)))]
+        maze[1 + 2 * row + dr, 1 + 2 * col + dc] = False
+        maze[1 + 2 * next_row, 1 + 2 * next_col] = False
+        visited[next_row, next_col] = True
+        stack.append((next_row, next_col))
+
+    return maze
+
+
+def _logical_maze_cell_center(row: int, col: int, scale: int) -> tuple[int, int]:
+    return (1 + 2 * row) * scale + scale // 2, (1 + 2 * col) * scale + scale // 2
+
+
+def _clear_endpoint(barriers: np.ndarray, cost: np.ndarray, point: tuple[int, int]) -> None:
+    row, col = point
+    row_slice = slice(max(0, row - 1), min(barriers.shape[0], row + 2))
+    col_slice = slice(max(0, col - 1), min(barriers.shape[1], col + 2))
+    barriers[row_slice, col_slice] = False
+    cost[row_slice, col_slice] = np.minimum(cost[row_slice, col_slice], 1.0)

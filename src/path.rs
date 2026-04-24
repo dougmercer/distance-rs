@@ -164,7 +164,23 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
         row = row.clamp(0.0, (rows - 1) as f64);
         col = col.clamp(0.0, (cols - 1) as f64);
         if !finite_segment_clear(&request.distance, previous_row, previous_col, row, col) {
-            return trace_parent_path(&request);
+            let center_row = current_row as f64;
+            let center_col = current_col as f64;
+            if ((previous_row - center_row).abs() > 1.0e-7
+                || (previous_col - center_col).abs() > 1.0e-7)
+                && finite_segment_clear(
+                    &request.distance,
+                    previous_row,
+                    previous_col,
+                    center_row,
+                    center_col,
+                )
+            {
+                row = center_row;
+                col = center_col;
+            } else {
+                return trace_parent_path(&request);
+            }
         }
 
         push_coord(
