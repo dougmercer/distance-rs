@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from typing import Any, Mapping, Sequence
 
@@ -8,6 +8,9 @@ import numpy as np
 import numpy.typing as npt
 
 from . import _native
+
+
+Cell = tuple[int, int]
 
 
 _ALIASES = {
@@ -221,6 +224,38 @@ class VerticalFactor:
         return options
 
 
+@dataclass(frozen=True)
+class RasterGrid:
+    """Map raster cell coordinates into solver x/y coordinates."""
+
+    cell_size: float | tuple[float, float] = 1.0
+    origin: tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class RasterSurface:
+    """Solver-ready raster layers on one grid.
+
+    `cost` is required. `elevation` and `barriers` must have the same shape when
+    supplied. Non-finite cost/elevation cells are treated as blocked in addition
+    to the explicit barrier mask.
+    """
+
+    cost: npt.ArrayLike
+    grid: RasterGrid = field(default_factory=RasterGrid)
+    elevation: npt.ArrayLike | None = None
+    barriers: npt.ArrayLike | None = None
+
+
+@dataclass(frozen=True)
+class SolverOptions:
+    """Numerical options for distance accumulation."""
+
+    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None
+    stencil_radius: float | None = None
+    use_surface_distance: bool = True
+
+
 @dataclass
 class DistanceAccumulationResult:
     distance: npt.NDArray[np.float64]
@@ -231,7 +266,7 @@ class DistanceAccumulationResult:
     cell_size: tuple[float, float]
     origin: tuple[float, float]
     vertical_factor: VerticalFactor
-    search_radius: float
+    stencil_radius: float
 
     def optimal_path_as_line(
         self,
@@ -243,72 +278,52 @@ class DistanceAccumulationResult:
 
 
 def distance_accumulation(
-    sources: npt.ArrayLike,
+    surface: RasterSurface | npt.ArrayLike,
+    source: Cell | Sequence[Cell] | npt.ArrayLike,
     *,
-    cost_surface: npt.ArrayLike | None = None,
-    elevation: npt.ArrayLike | None = None,
-    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
-    barriers: npt.ArrayLike | None = None,
-    cell_size: float | tuple[float, float] = 1.0,
-    origin: tuple[float, float] = (0.0, 0.0),
-    search_radius: float | None = None,
-    use_surface_distance: bool = True,
+    options: SolverOptions | None = None,
 ) -> DistanceAccumulationResult:
-    """Compute accumulated cost distance from source cells.
+    """Compute accumulated cost distance from one or more source cells.
 
-    `sources`, `cost_surface`, `elevation`, and `barriers` are two-dimensional
-    rasters. Nonzero finite source values are treated as source cells. Non-finite
-    cost/elevation values are treated as blocked cells.
+    `surface` may be a `RasterSurface` or a plain 2D cost array. `source` is a
+    `(row, col)` cell or an `(n, 2)` sequence of cells. The route-level API uses
+    one source per leg; accepting multiple cells here keeps the native solver
+    useful for accumulation/allocation workflows without exposing source rasters.
     """
 
-    source_arr = np.ascontiguousarray(np.asarray(sources, dtype=np.float64))
-    if source_arr.ndim != 2:
-        raise ValueError("sources must be a 2D array")
+    if not isinstance(surface, RasterSurface):
+        surface = RasterSurface(surface)
+    if options is None:
+        options = SolverOptions()
+    if not isinstance(options, SolverOptions):
+        raise TypeError("options must be a SolverOptions instance")
 
-    rows, cols = source_arr.shape
-    cost_arr = (
-        np.ones((rows, cols), dtype=np.float64)
-        if cost_surface is None
-        else np.ascontiguousarray(np.asarray(cost_surface, dtype=np.float64))
-    )
-    if cost_arr.shape != source_arr.shape:
-        raise ValueError("cost_surface must have the same shape as sources")
+    cost_arr = np.ascontiguousarray(np.asarray(surface.cost, dtype=np.float64))
+    if cost_arr.ndim != 2:
+        raise ValueError("surface cost must be a 2D array")
 
-    has_elevation = elevation is not None
-    elevation_arr = (
-        None
-        if elevation is None
-        else np.ascontiguousarray(np.asarray(elevation, dtype=np.float64))
-    )
-    if elevation_arr is not None and elevation_arr.shape != source_arr.shape:
-        raise ValueError("elevation must have the same shape as sources")
+    rows, cols = cost_arr.shape
+    elevation_arr = _optional_surface_array(surface.elevation, cost_arr.shape, "elevation")
+    barrier_arr = _optional_barrier_array(surface.barriers, cost_arr.shape)
+    source_cells = _normalize_source_cells(source, cost_arr.shape)
 
-    barrier_arr = (
-        None
-        if barriers is None
-        else np.ascontiguousarray(np.asarray(barriers, dtype=np.bool_))
-    )
-    if barrier_arr is not None and barrier_arr.shape != source_arr.shape:
-        raise ValueError("barriers must have the same shape as sources")
-
-    cell_size_x, cell_size_y = _normalize_cell_size(cell_size)
-    if search_radius is None:
-        search_radius_value = 4.0 * max(cell_size_x, cell_size_y)
+    cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
+    if options.stencil_radius is None:
+        stencil_radius_value = 4.0 * max(cell_size_x, cell_size_y)
     else:
-        search_radius_value = float(search_radius)
-    if search_radius_value <= 0.0 or not math.isfinite(search_radius_value):
-        raise ValueError("search_radius must be a positive finite value")
+        stencil_radius_value = float(options.stencil_radius)
+    if stencil_radius_value <= 0.0 or not math.isfinite(stencil_radius_value):
+        raise ValueError("stencil_radius must be a positive finite value")
 
-    vf = VerticalFactor.from_any(vertical_factor)
-    origin_x, origin_y = _normalize_origin(origin)
+    vf = VerticalFactor.from_any(options.vertical_factor)
+    origin_x, origin_y = _normalize_origin(surface.grid.origin)
 
     raw = _native.distance_accumulation(
-        source_arr,
+        source_cells,
         cost_arr,
         elevation_arr,
         barrier_arr,
-        has_elevation,
-        use_surface_distance,
+        options.use_surface_distance,
         vf.type,
         vf.zero_factor,
         vf.low_cut_angle,
@@ -319,7 +334,7 @@ def distance_accumulation(
         vf.sec_power,
         cell_size_x,
         cell_size_y,
-        search_radius_value,
+        stencil_radius_value,
     )
 
     return DistanceAccumulationResult(
@@ -331,8 +346,63 @@ def distance_accumulation(
         cell_size=(cell_size_x, cell_size_y),
         origin=(origin_x, origin_y),
         vertical_factor=vf,
-        search_radius=search_radius_value,
+        stencil_radius=stencil_radius_value,
     )
+
+
+def _optional_surface_array(
+    value: npt.ArrayLike | None,
+    shape: tuple[int, int],
+    name: str,
+) -> npt.NDArray[np.float64] | None:
+    if value is None:
+        return None
+    array = np.ascontiguousarray(np.asarray(value, dtype=np.float64))
+    if array.shape != shape:
+        raise ValueError(f"{name} must have the same shape as cost")
+    return array
+
+
+def _optional_barrier_array(
+    value: npt.ArrayLike | None,
+    shape: tuple[int, int],
+) -> npt.NDArray[np.bool_] | None:
+    if value is None:
+        return None
+    array = np.ascontiguousarray(np.asarray(value, dtype=np.bool_))
+    if array.shape != shape:
+        raise ValueError("barriers must have the same shape as cost")
+    return array
+
+
+def _normalize_source_cells(
+    source: Cell | Sequence[Cell] | npt.ArrayLike,
+    shape: tuple[int, int],
+) -> npt.NDArray[np.int64]:
+    cells_float = np.asarray(source, dtype=np.float64)
+    if cells_float.ndim == 1 and cells_float.shape == (2,):
+        cells_float = cells_float.reshape(1, 2)
+    if cells_float.ndim != 2 or cells_float.shape[1] != 2:
+        raise ValueError("source must be a (row, col) cell or an (n, 2) cell array")
+    if cells_float.shape[0] == 0:
+        raise ValueError("at least one source cell is required")
+    if not np.all(np.isfinite(cells_float)):
+        raise ValueError("source cells must be finite")
+
+    rounded = np.rint(cells_float)
+    if not np.array_equal(cells_float, rounded):
+        raise ValueError("source cells must be integer row/col coordinates")
+    cells = np.ascontiguousarray(rounded.astype(np.int64))
+
+    rows, cols = shape
+    if (
+        np.any(cells[:, 0] < 0)
+        or np.any(cells[:, 1] < 0)
+        or np.any(cells[:, 0] >= rows)
+        or np.any(cells[:, 1] >= cols)
+    ):
+        raise ValueError("source cell is outside the raster")
+    return cells
 
 
 def optimal_path_as_line(

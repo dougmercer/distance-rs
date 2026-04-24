@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from distance_rs import distance_accumulation, optimal_path_as_line
+from distance_rs import SolverOptions, distance_accumulation, optimal_path_as_line
 from distance_rs.baselines import raster_dijkstra, trace_raster_path
 
 
@@ -79,10 +79,12 @@ def main() -> int:
     cost = np.ones((rows, cols), dtype=np.float64)
 
     ordered = distance_accumulation(
-        sources,
-        cost_surface=cost,
-        search_radius=args.search_radius,
-        use_surface_distance=False,
+        cost,
+        source=source,
+        options=SolverOptions(
+            stencil_radius=args.search_radius,
+            use_surface_distance=False,
+        ),
     )
     dijkstra = raster_dijkstra(
         sources,
@@ -320,9 +322,7 @@ def plot_routes(
         error_ax.set_ylabel("cells^2")
         error_ax.grid(True, color="#d0d0d0", linewidth=0.5)
 
-    fig.suptitle(
-        "Flat unit-cost routes: Dijkstra is exact at 45 deg, then drifts off-axis"
-    )
+    fig.suptitle("Flat unit-cost routes: Dijkstra is exact at 45 deg, then drifts off-axis")
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
 
@@ -548,14 +548,8 @@ def dijkstra_state_progress_key(
     diagonals_used: int,
 ) -> int:
     if step_plan.row_major:
-        return (
-            step_plan.total_col_steps * diagonals_used
-            + step_plan.total_row_steps * step_index
-        )
-    return (
-        step_plan.total_col_steps * step_index
-        + step_plan.total_row_steps * diagonals_used
-    )
+        return step_plan.total_col_steps * diagonals_used + step_plan.total_row_steps * step_index
+    return step_plan.total_col_steps * step_index + step_plan.total_row_steps * diagonals_used
 
 
 def feasible_diagonal_range(
@@ -626,9 +620,7 @@ def cumulative_cross_track_area_profile(
     progress, cross_track = cross_track_profile(line, source, destination)
     if len(progress) < 2:
         return progress, np.zeros(len(progress), dtype=np.float64)
-    segment_area = np.diff(progress) * (
-        np.abs(cross_track[:-1]) + np.abs(cross_track[1:])
-    )
+    segment_area = np.diff(progress) * (np.abs(cross_track[:-1]) + np.abs(cross_track[1:]))
     cumulative_area = np.concatenate(([0.0], np.cumsum(0.5 * segment_area)))
     return progress, cumulative_area
 
@@ -638,9 +630,7 @@ def path_area_from_straight_line(
     source: tuple[int, int],
     destination: tuple[int, int],
 ) -> float:
-    _progress, cumulative_area = cumulative_cross_track_area_profile(
-        line, source, destination
-    )
+    _progress, cumulative_area = cumulative_cross_track_area_profile(line, source, destination)
     return float(cumulative_area[-1]) if len(cumulative_area) else 0.0
 
 

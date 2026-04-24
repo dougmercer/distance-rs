@@ -21,7 +21,13 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from distance_rs import VerticalFactor, distance_accumulation
+from distance_rs import (
+    RasterGrid,
+    RasterSurface,
+    SolverOptions,
+    VerticalFactor,
+    distance_accumulation,
+)
 from distance_rs.baselines import (
     MIN_COST,
     WHITEBOX_NODATA,
@@ -61,6 +67,10 @@ class RouteResult:
     path_mask: npt.NDArray[np.bool_] | None = None
     status: str = "ok"
     error: str | None = None
+
+
+def source_cells(sources: npt.NDArray[np.float64]) -> npt.NDArray[np.int64]:
+    return np.argwhere((sources != 0.0) & np.isfinite(sources)).astype(np.int64)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -288,14 +298,18 @@ def run_ordered_upwind(
     origin = origin_for_case(case)
     start = time.perf_counter()
     result = distance_accumulation(
-        case.sources,
-        cost_surface=case.cost,
-        barriers=case.barriers,
-        vertical_factor=case.vertical_factor,
-        cell_size=case.cell_size,
-        origin=origin,
-        search_radius=search_radius,
-        use_surface_distance=False,
+        RasterSurface(
+            case.cost,
+            grid=RasterGrid(cell_size=case.cell_size, origin=origin),
+            elevation=case.elevation,
+            barriers=case.barriers,
+        ),
+        source=source_cells(case.sources),
+        options=SolverOptions(
+            vertical_factor=case.vertical_factor,
+            stencil_radius=search_radius,
+            use_surface_distance=False,
+        ),
     )
     elapsed = time.perf_counter() - start
     destination_cost = float(result.distance[destination])

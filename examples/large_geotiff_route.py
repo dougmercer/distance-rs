@@ -1,7 +1,7 @@
 """Generate large synthetic GeoTIFFs and route across a cropped corridor.
 
 The default rasters are 8000 x 8000 pixels at 1.5 meter resolution. The route
-only spans a few hundred meters, so `compute_optimal_path` should read/reproject
+only spans a few hundred meters, so `route_path` should read/reproject
 only a small corridor around each leg when `crop_buffer` is set.
 """
 
@@ -21,7 +21,18 @@ from rasterio.transform import from_origin, rowcol
 from rasterio.windows import Window, bounds as window_bounds, from_bounds
 from shapely.geometry import Polygon
 
-from distance_rs import OptimalPathResult, PathMetrics, compute_optimal_path, prepare_geo_inputs
+from distance_rs import (
+    CostRaster,
+    GeoBarriers,
+    GeoPoints,
+    GeoSurface,
+    GridSpec,
+    OptimalPathResult,
+    PathMetrics,
+    SolverOptions,
+    load_surface,
+    route_path,
+)
 from distance_rs.baselines import raster_dijkstra, trace_raster_path
 
 
@@ -56,6 +67,7 @@ LAND_USE_LABELS = {
     6: "Talus",
     7: "Wetland",
 }
+Bounds = tuple[float, float, float, float]
 
 
 class BaselineLeg:
@@ -109,19 +121,17 @@ def main(argv: list[str] | None = None) -> None:
 
     waypoints = route_waypoints(args.size, args.cell_size)
     barriers = route_barriers(args.size, args.cell_size)
-    route = compute_optimal_path(
-        land_use_path,
-        waypoints,
-        barriers=barriers,
+    route = route_path(
+        CostRaster(land_use_path, values=LAND_USE_COSTS),
+        GeoPoints(waypoints, crs=CRS),
+        barriers=[GeoBarriers(barrier, crs=CRS) for barrier in barriers],
         elevation=elevation_path,
-        vertical_factor=VERTICAL_FACTOR,
-        crop_buffer=args.crop_buffer,
-        stencil_radius=args.stencil_radius,
+        grid=GridSpec(crs=CRS, margin=args.crop_buffer),
+        solver=SolverOptions(
+            vertical_factor=VERTICAL_FACTOR,
+            stencil_radius=args.stencil_radius,
+        ),
         baseline_speed=args.baseline_speed,
-        land_use_costs=LAND_USE_COSTS,
-        waypoint_crs=CRS,
-        barrier_crs=CRS,
-        clear_waypoint_cells=True,
     )
     dijkstra_route = run_raster_dijkstra_route(
         land_use_path,
@@ -252,7 +262,9 @@ def generate_large_geotiffs(
         print(f"using existing rasters in {land_use_path.parent}")
         return
 
-    print(f"generating {size}x{size} GeoTIFFs at {cell_size:g} m resolution in {land_use_path.parent}")
+    print(
+        f"generating {size}x{size} GeoTIFFs at {cell_size:g} m resolution in {land_use_path.parent}"
+    )
     transform = from_origin(WEST, NORTH, cell_size, cell_size)
     profile: dict[str, Any] = {
         "driver": "GTiff",
@@ -309,9 +321,7 @@ def synthetic_land_use(
         + 0.20 * np.cos((2.3 * nx - ny) * 211.0)
     )
     coarse_texture = (
-        np.sin(nx * 17.0 + 0.7)
-        + 0.75 * np.cos(ny * 21.0 - 1.3)
-        + 0.45 * np.sin((nx - ny) * 33.0)
+        np.sin(nx * 17.0 + 0.7) + 0.75 * np.cos(ny * 21.0 - 1.3) + 0.45 * np.sin((nx - ny) * 33.0)
     )
     forest_blob = (
         1.05 * gaussian(nx, ny, 0.36, 0.21, 0.055, 0.035)
@@ -339,11 +349,9 @@ def synthetic_land_use(
         + 0.95 * gaussian_m(local_east, local_north, 470.0, 145.0, 90.0, 55.0)
         + 0.80 * gaussian_m(local_east, local_north, 690.0, -15.0, 95.0, 45.0)
     )
-    local_talus = (
-        np.exp(-((local_north - local_ridge_north) ** 2) / (2.0 * 16.0**2))
-        * np.exp(-((local_east - 420.0) ** 2) / (2.0 * 260.0**2))
-        + 0.70 * gaussian_m(local_east, local_north, 585.0, 125.0, 55.0, 24.0)
-    )
+    local_talus = np.exp(-((local_north - local_ridge_north) ** 2) / (2.0 * 16.0**2)) * np.exp(
+        -((local_east - 420.0) ** 2) / (2.0 * 260.0**2)
+    ) + 0.70 * gaussian_m(local_east, local_north, 585.0, 125.0, 55.0, 24.0)
     local_wetland = (
         np.exp(-((local_north - local_creek_north) ** 2) / (2.0 * 10.0**2))
         + 0.85 * gaussian_m(local_east, local_north, 355.0, -70.0, 65.0, 24.0)
@@ -387,7 +395,8 @@ def synthetic_elevation(
         + 54.0 * gaussian(nx, ny, 0.39, 0.22, 0.052, 0.026)
         + 47.0 * gaussian(nx, ny, 0.54, 0.39, 0.065, 0.034)
         + 39.0 * gaussian(nx, ny, 0.68, 0.47, 0.090, 0.052)
-        + 32.0 * np.exp(-((local_north - local_ridge_north) ** 2) / (2.0 * 24.0**2))
+        + 32.0
+        * np.exp(-((local_north - local_ridge_north) ** 2) / (2.0 * 24.0**2))
         * np.exp(-((local_east - 430.0) ** 2) / (2.0 * 320.0**2))
         + 22.0 * gaussian_m(local_east, local_north, 585.0, 130.0, 60.0, 32.0)
     )
@@ -396,7 +405,8 @@ def synthetic_elevation(
         + 22.0 * gaussian(nx, ny, 0.30, 0.31, 0.050, 0.020)
         + 18.0 * gaussian(nx, ny, 0.50, 0.27, 0.060, 0.018)
         + 16.0 * np.exp(-((ny - (0.62 + 0.045 * np.sin(nx * 16.0 + 1.5))) ** 2) / (2.0 * 0.015**2))
-        + 28.0 * np.exp(-((local_north - local_creek_north) ** 2) / (2.0 * 18.0**2))
+        + 28.0
+        * np.exp(-((local_north - local_creek_north) ** 2) / (2.0 * 18.0**2))
         * np.exp(-((local_east - 430.0) ** 2) / (2.0 * 410.0**2))
     )
     rolling = (
@@ -452,10 +462,7 @@ def gaussian(
     radius_y: float,
 ) -> npt.NDArray[np.float32]:
     return np.exp(
-        -(
-            (nx - center_x) ** 2 / (2.0 * radius_x**2)
-            + (ny - center_y) ** 2 / (2.0 * radius_y**2)
-        )
+        -((nx - center_x) ** 2 / (2.0 * radius_x**2) + (ny - center_y) ** 2 / (2.0 * radius_y**2))
     )
 
 
@@ -525,7 +532,7 @@ def route_barriers(size: int, cell_size: float) -> list[Polygon]:
                 (574.0, 190.0),
                 (508.0, 150.0),
             ],
-        )
+        ),
     ]
 
 
@@ -547,36 +554,37 @@ def run_raster_dijkstra_route(
     total_metrics: PathMetrics | None = None
 
     for index, (start_xy, end_xy) in enumerate(zip(waypoints, waypoints[1:])):
-        geo = prepare_geo_inputs(
-            land_use_path,
-            elevation_path=elevation_path,
-            waypoints=[start_xy, end_xy],
-            waypoint_crs=CRS,
-            land_use_costs=LAND_USE_COSTS,
-            barriers=barriers,
-            barrier_crs=CRS,
-            clear_waypoint_cells=True,
-            crop_buffer=crop_buffer,
+        geo = load_surface(
+            CostRaster(land_use_path, values=LAND_USE_COSTS),
+            elevation=elevation_path,
+            barriers=[GeoBarriers(barrier, crs=CRS) for barrier in barriers],
+            grid=GridSpec(crs=CRS, bounds=leg_bounds(start_xy, end_xy, crop_buffer)),
         )
+        source_cell = geo.grid.xy_to_cell(*start_xy)
+        destination_cell = geo.grid.xy_to_cell(*end_xy)
+        sources = np.zeros(geo.grid.shape, dtype=np.float64)
+        sources[source_cell] = 1.0
         result = raster_dijkstra(
-            geo.sources,
-            cost_surface=geo.cost_surface,
-            elevation=geo.elevation,
+            sources,
+            cost_surface=geo.surface.cost,
+            elevation=geo.surface.elevation,
             vertical_factor=VERTICAL_FACTOR,
-            barriers=geo.barriers,
-            cell_size=geo.cell_size,
+            barriers=geo.surface.barriers,
+            cell_size=geo.grid.cell_size,
         )
-        if geo.destination_cell is None:
-            raise ValueError("baseline route requires a destination waypoint")
 
-        destination_cost = float(result.distance[geo.destination_cell])
+        destination_cost = float(result.distance[destination_cell])
         if not math.isfinite(destination_cost):
             raise ValueError(f"raster Dijkstra could not reach leg {index} destination")
 
-        cell_line = trace_raster_path(result.parent, geo.destination_cell)
-        path_xy = geo.raster_line_to_xy(cell_line)[::-1].copy()
-        metrics = path_metrics(path_xy, cost=destination_cost, geo=geo, baseline_speed=baseline_speed)
-        total_metrics = metrics if total_metrics is None else combine_metrics(total_metrics, metrics)
+        cell_line = trace_raster_path(result.parent, destination_cell, cell_size=geo.grid.cell_size)
+        path_xy = geo.grid.raster_line_to_xy(cell_line)[::-1].copy()
+        metrics = path_metrics(
+            path_xy, cost=destination_cost, geo=geo, baseline_speed=baseline_speed
+        )
+        total_metrics = (
+            metrics if total_metrics is None else combine_metrics(total_metrics, metrics)
+        )
 
         legs.append(
             BaselineLeg(
@@ -597,21 +605,26 @@ def run_raster_dijkstra_route(
     )
 
 
+def leg_bounds(start_xy: tuple[float, float], end_xy: tuple[float, float], margin: float) -> Bounds:
+    return (
+        min(start_xy[0], end_xy[0]) - margin,
+        min(start_xy[1], end_xy[1]) - margin,
+        max(start_xy[0], end_xy[0]) + margin,
+        max(start_xy[1], end_xy[1]) + margin,
+    )
+
+
 def path_metrics(
     path_xy: npt.NDArray[np.float64],
     *,
     cost: float,
-    geo: Any,
+    geo: GeoSurface,
     baseline_speed: float,
 ) -> PathMetrics:
     distance_m = path_distance(path_xy)
     surface_distance_m = path_surface_distance(path_xy, geo)
     time_hours = cost / (baseline_speed * 1000.0)
-    average_speed_kmh = (
-        surface_distance_m / 1000.0 / time_hours
-        if time_hours > 0.0
-        else math.inf
-    )
+    average_speed_kmh = surface_distance_m / 1000.0 / time_hours if time_hours > 0.0 else math.inf
     return PathMetrics(
         cost=cost,
         distance_m=distance_m,
@@ -628,9 +641,9 @@ def path_distance(path_xy: npt.NDArray[np.float64]) -> float:
     return float(np.hypot(delta[:, 0], delta[:, 1]).sum())
 
 
-def path_surface_distance(path_xy: npt.NDArray[np.float64], geo: Any) -> float:
+def path_surface_distance(path_xy: npt.NDArray[np.float64], geo: GeoSurface) -> float:
     plan_distances = segment_plan_distances(path_xy)
-    if geo.elevation is None or plan_distances.size == 0:
+    if geo.surface.elevation is None or plan_distances.size == 0:
         return float(plan_distances.sum())
 
     elevations = sample_elevation(path_xy, geo)
@@ -648,20 +661,20 @@ def segment_plan_distances(path_xy: npt.NDArray[np.float64]) -> npt.NDArray[np.f
     return np.hypot(delta[:, 0], delta[:, 1])
 
 
-def sample_elevation(path_xy: npt.NDArray[np.float64], geo: Any) -> npt.NDArray[np.float64]:
-    if geo.elevation is None:
+def sample_elevation(path_xy: npt.NDArray[np.float64], geo: GeoSurface) -> npt.NDArray[np.float64]:
+    if geo.surface.elevation is None:
         return np.full(len(path_xy), np.nan, dtype=np.float64)
     rows, cols = rowcol(
-        geo.transform,
+        geo.grid.transform,
         path_xy[:, 0].tolist(),
         path_xy[:, 1].tolist(),
         op=math.floor,
     )
-    height, width = geo.elevation.shape
+    height, width = geo.surface.elevation.shape
     out = np.full(len(path_xy), np.nan, dtype=np.float64)
     for point_index, (row, col) in enumerate(zip(rows, cols)):
         if 0 <= row < height and 0 <= col < width:
-            out[point_index] = float(geo.elevation[int(row), int(col)])
+            out[point_index] = float(geo.surface.elevation[int(row), int(col)])
     return out
 
 
@@ -802,7 +815,9 @@ def plot_route_map(
         max_plot_pixels=max_plot_pixels,
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6.6), constrained_layout=True, sharex=True, sharey=True)
+    fig, axes = plt.subplots(
+        1, 2, figsize=(14, 6.6), constrained_layout=True, sharex=True, sharey=True
+    )
     terrain_ax, land_ax = axes
 
     ls = LightSource(azdeg=315, altdeg=45)
@@ -834,7 +849,9 @@ def plot_route_map(
 
     for ax in axes:
         draw_barriers(ax, barriers)
-        draw_route(ax, ordered_route.path_xy, color="#d95f02", label="Ordered Upwind", linewidth=2.8)
+        draw_route(
+            ax, ordered_route.path_xy, color="#d95f02", label="Ordered Upwind", linewidth=2.8
+        )
         draw_route(
             ax,
             dijkstra_route.path_xy,

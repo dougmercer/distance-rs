@@ -25,7 +25,13 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from distance_rs import VerticalFactor, distance_accumulation
+from distance_rs import (
+    RasterGrid,
+    RasterSurface,
+    SolverOptions,
+    VerticalFactor,
+    distance_accumulation,
+)
 from distance_rs.baselines import (
     MIN_COST,
     WHITEBOX_NODATA,
@@ -62,6 +68,10 @@ class RouteResult:
     status: str = "ok"
     error: str | None = None
     note: str | None = None
+
+
+def source_cells(sources: npt.NDArray[np.float64]) -> npt.NDArray[np.int64]:
+    return np.argwhere((sources != 0.0) & np.isfinite(sources)).astype(np.int64)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -185,15 +195,15 @@ def make_case(*, rows: int, cols: int, cell_size: float, cutoff_degrees: float) 
     barriers = np.zeros((rows, cols), dtype=np.bool_)
 
     # Tall ridge at center, but a low saddle opens around y ~= -0.55.
-    ridge_height = 120.0 - 112.0 * np.exp(-((y + 0.55) / 0.20) ** 2)
-    ridge = ridge_height * np.exp(-((x - 0.52) / 0.035) ** 2)
-    rolling_ground = 10.0 * np.sin(2.0 * math.pi * x) * np.exp(-(y / 0.8) ** 2)
+    ridge_height = 120.0 - 112.0 * np.exp(-(((y + 0.55) / 0.20) ** 2))
+    ridge = ridge_height * np.exp(-(((x - 0.52) / 0.035) ** 2))
+    rolling_ground = 10.0 * np.sin(2.0 * math.pi * x) * np.exp(-((y / 0.8) ** 2))
     elevation = (ridge + rolling_ground).astype(np.float64)
 
-    straight_road = np.exp(-(y / 0.045) ** 2)
+    straight_road = np.exp(-((y / 0.045) ** 2))
     saddle_ramp_center = -0.55 * np.sin(math.pi * x)
-    saddle_ramp = np.exp(-((y - saddle_ramp_center) / 0.050) ** 2)
-    saddle_floor = np.exp(-((y + 0.55) / 0.22) ** 2) * np.exp(-((x - 0.52) / 0.18) ** 2)
+    saddle_ramp = np.exp(-(((y - saddle_ramp_center) / 0.050) ** 2))
+    saddle_floor = np.exp(-(((y + 0.55) / 0.22) ** 2)) * np.exp(-(((x - 0.52) / 0.18) ** 2))
     texture = 0.08 * np.sin(13.0 * math.pi * x + 3.0 * y) + 0.05 * np.cos(9.0 * math.pi * y)
     cost = 3.0 - 2.55 * straight_road - 2.05 * saddle_ramp - 0.45 * saddle_floor + texture
     cost = np.maximum(cost, 0.28).astype(np.float64)
@@ -221,15 +231,18 @@ def make_case(*, rows: int, cols: int, cell_size: float, cutoff_degrees: float) 
 def run_ordered_upwind(case: CaseData, *, search_radius: float) -> RouteResult:
     start = time.perf_counter()
     result = distance_accumulation(
-        case.sources,
-        cost_surface=case.cost,
-        elevation=case.elevation,
-        barriers=case.barriers,
-        vertical_factor=case.vertical_factor,
-        cell_size=case.cell_size,
-        origin=origin_for_case(case),
-        search_radius=search_radius,
-        use_surface_distance=True,
+        RasterSurface(
+            case.cost,
+            grid=RasterGrid(cell_size=case.cell_size, origin=origin_for_case(case)),
+            elevation=case.elevation,
+            barriers=case.barriers,
+        ),
+        source=source_cells(case.sources),
+        options=SolverOptions(
+            vertical_factor=case.vertical_factor,
+            stencil_radius=search_radius,
+            use_surface_distance=True,
+        ),
     )
     elapsed = time.perf_counter() - start
     destination_cost = float(result.distance[case.destination])
@@ -422,7 +435,9 @@ def draw_routes(
         color = colors.get(result.solver, "white")
         label = label_for_result(result)
         if result.line_xy is not None and len(result.line_xy) > 0:
-            ax.plot(result.line_xy[:, 0], result.line_xy[:, 1], color=color, linewidth=2.2, label=label)
+            ax.plot(
+                result.line_xy[:, 0], result.line_xy[:, 1], color=color, linewidth=2.2, label=label
+            )
         elif result.path_mask is not None:
             ax.imshow(
                 np.ma.masked_where(~result.path_mask, result.path_mask),

@@ -11,8 +11,16 @@ from rasterio.transform import from_origin
 from rasterio.warp import transform as transform_coords
 from shapely.geometry import LineString, Polygon
 
-from distance_rs import compute_optimal_path, distance_accumulation
-from distance_rs._geo import geo_distance_accumulation, geo_optimal_path_as_line, prepare_geo_inputs
+from distance_rs import (
+    CostRaster,
+    GeoBarriers,
+    GeoPoints,
+    GridSpec,
+    SolverOptions,
+    load_points,
+    load_surface,
+    route_path,
+)
 
 
 def _write_geotiff(
@@ -38,7 +46,7 @@ def _write_geotiff(
         dataset.write(data, 1)
 
 
-def test_prepare_geo_inputs_aligns_geotiffs_and_linestring_waypoints(tmp_path: Path) -> None:
+def test_load_surface_aligns_geotiffs_and_cost_classes(tmp_path: Path) -> None:
     transform = from_origin(0.0, 40.0, 10.0, 10.0)
     land_use_path = tmp_path / "land_use.tif"
     elevation_path = tmp_path / "elevation.tif"
@@ -67,48 +75,35 @@ def test_prepare_geo_inputs_aligns_geotiffs_and_linestring_waypoints(tmp_path: P
         crs="EPSG:3857",
     )
 
-    geo = prepare_geo_inputs(
-        land_use_path,
-        elevation_path=elevation_path,
-        waypoints=LineString([(5.0, 35.0), (35.0, 5.0)]),
-        land_use_costs={1: 1.0, 2: 2.0, 3: 3.0},
-        barrier_values={99},
-        resolution=10.0,
+    geo = load_surface(
+        CostRaster(
+            land_use_path,
+            values={1: 1.0, 2: 2.0, 3: 3.0},
+            blocked_values={99},
+        ),
+        elevation=elevation_path,
+        grid=GridSpec(resolution=10.0),
     )
 
     assert geo.land_use.shape == (4, 4)
-    assert geo.elevation is not None
-    assert geo.elevation.shape == (4, 4)
-    assert geo.cost_surface.shape == (4, 4)
-    assert geo.cell_size == (10.0, 10.0)
-    assert geo.source_cell == (0, 0)
-    assert geo.destination_cell == (3, 3)
-    assert geo.sources[0, 0] == 1.0
-    assert geo.cost_surface[0, 2] == 2.0
-    assert geo.cost_surface[2, 2] == 3.0
-    assert geo.barriers[0, 3]
-    assert geo.barriers[2, 1]
+    assert geo.surface.elevation is not None
+    assert geo.surface.elevation.shape == (4, 4)
+    assert geo.surface.cost.shape == (4, 4)
+    assert geo.grid.cell_size == (10.0, 10.0)
+    assert geo.grid.xy_to_cell(5.0, 35.0) == (0, 0)
+    assert geo.grid.xy_to_cell(35.0, 5.0) == (3, 3)
+    assert geo.surface.cost[0, 2] == 2.0
+    assert geo.surface.cost[2, 2] == 3.0
+    assert geo.surface.barriers is not None
+    assert geo.surface.barriers[0, 3]
+    assert geo.surface.barriers[2, 1]
 
-    line_map_xy = geo.raster_line_to_xy(np.array([[0.0, 0.0], [3.0, 3.0]]))
+    line_map_xy = geo.grid.raster_line_to_xy(np.array([[0.0, 0.0], [30.0, 30.0]]))
     assert np.allclose(line_map_xy, np.array([[5.0, 35.0], [35.0, 5.0]]))
 
-    result = distance_accumulation(geo.sources, **geo.distance_kwargs())
-    assert result.distance[geo.source_cell] == 0.0
-    assert math.isfinite(float(result.distance[geo.destination_cell]))
 
-
-def test_prepare_geo_inputs_reprojects_gpkg_waypoints(tmp_path: Path) -> None:
-    land_use_path = tmp_path / "land_use.tif"
+def test_load_points_reprojects_gpkg_waypoints(tmp_path: Path) -> None:
     route_path = tmp_path / "route.gpkg"
-    transform = from_origin(0.0, 40.0, 10.0, 10.0)
-
-    _write_geotiff(
-        land_use_path,
-        np.ones((4, 4), dtype=np.float32),
-        transform=transform,
-        crs="EPSG:3857",
-    )
-
     xs, ys = transform_coords("EPSG:3857", "EPSG:4326", [5.0, 35.0], [35.0, 5.0])
     schema = {"geometry": "LineString", "properties": {}}
     with fiona.open(
@@ -126,42 +121,35 @@ def test_prepare_geo_inputs_reprojects_gpkg_waypoints(tmp_path: Path) -> None:
             }
         )
 
-    geo = prepare_geo_inputs(land_use_path, waypoints=route_path)
+    points = load_points(route_path, target_crs="EPSG:3857")
 
-    assert geo.source_cell == (0, 0)
-    assert geo.destination_cell == (3, 3)
-    assert math.isclose(geo.waypoint_xy[0][0], 5.0, abs_tol=1.0e-8)
-    assert math.isclose(geo.waypoint_xy[1][1], 5.0, abs_tol=1.0e-8)
+    assert math.isclose(points[0][0], 5.0, abs_tol=1.0e-8)
+    assert math.isclose(points[1][1], 5.0, abs_tol=1.0e-8)
 
 
-def test_prepare_geo_inputs_crops_to_buffer_and_forwards_stencil_radius(tmp_path: Path) -> None:
+def test_route_path_crops_to_margin_and_forwards_solver_options(tmp_path: Path) -> None:
     land_use_path = tmp_path / "large_land_use.tif"
     transform = from_origin(0.0, 1000.0, 10.0, 10.0)
-    land_use = np.arange(100 * 100, dtype=np.float32).reshape((100, 100))
+    land_use = np.ones((100, 100), dtype=np.float32)
     _write_geotiff(land_use_path, land_use, transform=transform, crs="EPSG:3857")
 
-    geo = prepare_geo_inputs(
+    route = route_path(
         land_use_path,
-        waypoints=LineString([(105.0, 895.0), (305.0, 795.0)]),
-        crop_buffer=25.0,
-        stencil_radius=40.0,
+        GeoPoints(LineString([(105.0, 895.0), (305.0, 795.0)]), crs="EPSG:3857"),
+        grid=GridSpec(margin=25.0),
+        solver=SolverOptions(stencil_radius=40.0),
     )
 
-    assert geo.land_use.shape == (15, 25)
-    assert geo.cost_surface.shape == (15, 25)
-    assert geo.sources.shape == (15, 25)
-    assert geo.bounds == (80.0, 770.0, 330.0, 920.0)
-    assert geo.cell_to_xy(0, 0) == (85.0, 915.0)
-    assert geo.source_cell == (2, 2)
-    assert geo.destination_cell == (12, 22)
-    assert geo.land_use[0, 0] == land_use[8, 8]
-    assert geo.land_use[-1, -1] == land_use[22, 32]
-    assert geo.crop_buffer == 25.0
-    assert geo.stencil_radius == 40.0
-    assert geo.distance_kwargs()["search_radius"] == 40.0
+    leg = route.legs[0]
+    assert leg.grid.shape == (15, 25)
+    assert leg.grid.bounds == (80.0, 770.0, 330.0, 920.0)
+    assert leg.grid.cell_to_xy(0, 0) == (85.0, 915.0)
+    assert leg.source_cell == (2, 2)
+    assert leg.destination_cell == (12, 22)
+    assert route.path_xy.shape[1] == 2
 
 
-def test_prepare_geo_inputs_rejects_invalid_radii(tmp_path: Path) -> None:
+def test_load_surface_rejects_invalid_grid_options(tmp_path: Path) -> None:
     land_use_path = tmp_path / "land_use.tif"
     _write_geotiff(
         land_use_path,
@@ -170,22 +158,18 @@ def test_prepare_geo_inputs_rejects_invalid_radii(tmp_path: Path) -> None:
         crs="EPSG:3857",
     )
 
-    with pytest.raises(ValueError, match="crop_buffer"):
-        prepare_geo_inputs(
-            land_use_path,
-            waypoints=LineString([(5.0, 35.0), (35.0, 5.0)]),
-            crop_buffer=0.0,
-        )
+    with pytest.raises(ValueError, match="resolution"):
+        load_surface(land_use_path, grid=GridSpec(resolution=0.0))
 
-    with pytest.raises(ValueError, match="stencil_radius"):
-        prepare_geo_inputs(
+    with pytest.raises(ValueError, match="margin"):
+        route_path(
             land_use_path,
-            waypoints=LineString([(5.0, 35.0), (35.0, 5.0)]),
-            stencil_radius=math.nan,
+            GeoPoints([(5.0, 35.0), (35.0, 5.0)], crs="EPSG:3857"),
+            grid=GridSpec(margin=math.nan),
         )
 
 
-def test_prepare_geo_inputs_requires_crs_for_plain_coordinate_waypoints(tmp_path: Path) -> None:
+def test_route_path_requires_crs_for_plain_coordinate_waypoints(tmp_path: Path) -> None:
     land_use_path = tmp_path / "land_use.tif"
     _write_geotiff(
         land_use_path,
@@ -194,11 +178,11 @@ def test_prepare_geo_inputs_requires_crs_for_plain_coordinate_waypoints(tmp_path
         crs="EPSG:3857",
     )
 
-    with pytest.raises(ValueError, match="waypoint_crs"):
-        prepare_geo_inputs(land_use_path, waypoints=[(5.0, 35.0), (35.0, 5.0)])
+    with pytest.raises(ValueError, match="GeoPoints"):
+        route_path(land_use_path, [(5.0, 35.0), (35.0, 5.0)])
 
 
-def test_prepare_geo_inputs_rasterizes_vector_barriers(tmp_path: Path) -> None:
+def test_load_surface_rasterizes_polygon_and_linestring_barriers(tmp_path: Path) -> None:
     land_use_path = tmp_path / "land_use.tif"
     _write_geotiff(
         land_use_path,
@@ -207,40 +191,24 @@ def test_prepare_geo_inputs_rasterizes_vector_barriers(tmp_path: Path) -> None:
         crs="EPSG:3857",
     )
 
-    geo = prepare_geo_inputs(
+    geo = load_surface(
         land_use_path,
-        waypoints=LineString([(5.0, 45.0), (45.0, 5.0)]),
-        barriers=Polygon([(21.0, 1.0), (29.0, 1.0), (29.0, 49.0), (21.0, 49.0)]),
-        barrier_all_touched=False,
+        barriers=[
+            GeoBarriers(
+                Polygon([(21.0, 1.0), (29.0, 1.0), (29.0, 49.0), (21.0, 49.0)]),
+                crs="EPSG:3857",
+                all_touched=False,
+            ),
+            GeoBarriers(LineString([(0.0, 25.0), (50.0, 25.0)]), crs="EPSG:3857"),
+        ],
     )
 
-    assert geo.barriers[:, 2].all()
-    assert not geo.barriers[:, 0].any()
+    assert geo.surface.barriers is not None
+    assert geo.surface.barriers[:, 2].all()
+    assert geo.surface.barriers[2, :].all()
 
 
-def test_geo_distance_accumulation_returns_map_path(tmp_path: Path) -> None:
-    land_use_path = tmp_path / "land_use.tif"
-    _write_geotiff(
-        land_use_path,
-        np.ones((5, 5), dtype=np.float32),
-        transform=from_origin(0.0, 50.0, 10.0, 10.0),
-        crs="EPSG:3857",
-    )
-
-    result = geo_distance_accumulation(
-        land_use_path,
-        waypoints=LineString([(5.0, 45.0), (45.0, 5.0)]),
-        crop_buffer=30.0,
-        stencil_radius=30.0,
-    )
-    line_xy = geo_optimal_path_as_line(result, reverse=True)
-
-    assert line_xy.shape[1] == 2
-    assert np.allclose(line_xy[0], [5.0, 45.0])
-    assert np.allclose(line_xy[-1], [45.0, 5.0])
-
-
-def test_compute_optimal_path_stitches_waypoint_legs_and_metrics(tmp_path: Path) -> None:
+def test_route_path_stitches_waypoint_legs_and_metrics(tmp_path: Path) -> None:
     cost_path = tmp_path / "cost.tif"
     _write_geotiff(
         cost_path,
@@ -249,13 +217,12 @@ def test_compute_optimal_path_stitches_waypoint_legs_and_metrics(tmp_path: Path)
         crs="EPSG:3857",
     )
 
-    route = compute_optimal_path(
+    route = route_path(
         cost_path,
-        [(5.0, 295.0), (145.0, 155.0), (245.0, 55.0)],
-        crop_buffer=40.0,
-        stencil_radius=40.0,
+        GeoPoints([(5.0, 295.0), (145.0, 155.0), (245.0, 55.0)], crs="EPSG:3857"),
+        grid=GridSpec(margin=40.0),
+        solver=SolverOptions(stencil_radius=40.0),
         baseline_speed=5.0,
-        waypoint_crs="EPSG:3857",
     )
 
     assert len(route.legs) == 2

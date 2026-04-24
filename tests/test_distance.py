@@ -7,7 +7,14 @@ import sys
 import numpy as np
 import pytest
 
-from distance_rs import VerticalFactor, distance_accumulation, optimal_path_as_line
+from distance_rs import (
+    RasterGrid,
+    RasterSurface,
+    SolverOptions,
+    VerticalFactor,
+    distance_accumulation,
+    optimal_path_as_line,
+)
 from distance_rs.baselines import raster_dijkstra, raster_dijkstra_baseline, trace_raster_path
 
 
@@ -30,10 +37,9 @@ print('distance_rs._geo' in sys.modules)
 
 
 def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
-    sources = np.zeros((21, 21), dtype=bool)
-    sources[10, 10] = True
+    cost = np.ones((21, 21), dtype=float)
 
-    result = distance_accumulation(sources, cost_surface=np.ones_like(sources, dtype=float))
+    result = distance_accumulation(cost, source=(10, 10))
 
     assert result.distance[10, 10] == 0.0
     assert result.distance[10, 15] == np.float64(5.0)
@@ -41,27 +47,33 @@ def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
 
 
 def test_barrier_blocks_cells() -> None:
-    sources = np.zeros((11, 11), dtype=bool)
-    sources[5, 2] = True
+    cost = np.ones((11, 11), dtype=float)
     barriers = np.zeros((11, 11), dtype=bool)
     barriers[:, 5] = True
+    surface = RasterSurface(cost, barriers=barriers)
 
-    result = distance_accumulation(sources, barriers=barriers, search_radius=3.0)
+    result = distance_accumulation(
+        surface,
+        source=(5, 2),
+        options=SolverOptions(stencil_radius=3.0),
+    )
 
     assert math.isinf(result.distance[5, 5])
     assert math.isinf(result.distance[5, 8])
 
 
 def test_binary_vertical_factor_blocks_upslope() -> None:
-    sources = np.zeros((9, 9), dtype=bool)
-    sources[4, 4] = True
+    cost = np.ones((9, 9), dtype=float)
     elevation = np.tile(np.arange(9, dtype=float), (9, 1))
+    surface = RasterSurface(cost, elevation=elevation)
 
     result = distance_accumulation(
-        sources,
-        elevation=elevation,
-        vertical_factor=VerticalFactor("binary", low_cut_angle=-90.0, high_cut_angle=0.1),
-        search_radius=3.0,
+        surface,
+        source=(4, 4),
+        options=SolverOptions(
+            vertical_factor=VerticalFactor("binary", low_cut_angle=-90.0, high_cut_angle=0.1),
+            stencil_radius=3.0,
+        ),
     )
 
     assert np.isfinite(result.distance[4, 3])
@@ -69,27 +81,34 @@ def test_binary_vertical_factor_blocks_upslope() -> None:
 
 
 def test_distance_accumulation_rejects_non_finite_numeric_options() -> None:
-    sources = np.zeros((3, 3), dtype=bool)
-    sources[1, 1] = True
+    cost = np.ones((3, 3), dtype=float)
 
-    with pytest.raises(ValueError, match="search_radius"):
-        distance_accumulation(sources, search_radius=math.nan)
+    with pytest.raises(ValueError, match="stencil_radius"):
+        distance_accumulation(cost, source=(1, 1), options=SolverOptions(stencil_radius=math.nan))
 
     with pytest.raises(ValueError, match="cell_size"):
-        distance_accumulation(sources, cell_size=math.nan)
+        surface = RasterSurface(cost, grid=RasterGrid(cell_size=math.nan))
+        distance_accumulation(surface, source=(1, 1))
 
     with pytest.raises(ValueError, match="origin"):
-        distance_accumulation(sources, origin=(0.0, math.inf))
+        surface = RasterSurface(cost, grid=RasterGrid(origin=(0.0, math.inf)))
+        distance_accumulation(surface, source=(1, 1))
 
     with pytest.raises(ValueError, match="vertical factor option"):
-        distance_accumulation(sources, vertical_factor={"type": "linear", "slope": math.nan})
+        distance_accumulation(
+            cost,
+            source=(1, 1),
+            options=SolverOptions(vertical_factor={"type": "linear", "slope": math.nan}),
+        )
+
+
+def test_distance_accumulation_rejects_non_integer_source_cell() -> None:
+    with pytest.raises(ValueError, match="integer"):
+        distance_accumulation(np.ones((3, 3), dtype=float), source=(1.2, 1))
 
 
 def test_optimal_path_as_line_reaches_source() -> None:
-    sources = np.zeros((15, 15), dtype=bool)
-    sources[7, 7] = True
-
-    result = distance_accumulation(sources)
+    result = distance_accumulation(np.ones((15, 15), dtype=float), source=(7, 7))
     line = optimal_path_as_line(result, (12, 12))
 
     assert line.shape[1] == 2

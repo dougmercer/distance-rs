@@ -1046,10 +1046,11 @@ impl Solver {
         let row1 = row_max + 1;
         let col0 = col_min;
         let col1 = col_max + 1;
-        self.blocked_prefix[row1 * stride + col1]
-            - self.blocked_prefix[row0 * stride + col1]
-            - self.blocked_prefix[row1 * stride + col0]
-            + self.blocked_prefix[row0 * stride + col0]
+        let total = self.blocked_prefix[row1 * stride + col1] as isize
+            - self.blocked_prefix[row0 * stride + col1] as isize
+            - self.blocked_prefix[row1 * stride + col0] as isize
+            + self.blocked_prefix[row0 * stride + col0] as isize;
+        total.max(0) as usize
     }
 
     fn physical_distance_coords(&self, row0: f64, col0: f64, row1: f64, col1: f64) -> f64 {
@@ -1171,11 +1172,10 @@ impl SolveOutput {
 #[allow(clippy::too_many_arguments)]
 fn distance_accumulation<'py>(
     py: Python<'py>,
-    sources: PyReadonlyArray2<'py, f64>,
+    source_cells: PyReadonlyArray2<'py, i64>,
     cost_surface: PyReadonlyArray2<'py, f64>,
     elevation: Option<PyReadonlyArray2<'py, f64>>,
     barriers: Option<PyReadonlyArray2<'py, bool>>,
-    has_elevation: bool,
     use_surface_distance: bool,
     vf_kind: &str,
     zero_factor: f64,
@@ -1189,37 +1189,38 @@ fn distance_accumulation<'py>(
     cell_size_y: f64,
     search_radius: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let sources = sources.as_array();
+    let source_cells = source_cells.as_array();
     let cost_surface = cost_surface.as_array();
     let elevation = elevation.as_ref().map(|array| array.as_array());
     let barriers = barriers.as_ref().map(|array| array.as_array());
 
-    let shape = sources.shape();
-    let rows = shape[0];
-    let cols = shape[1];
-    if cost_surface.shape() != shape {
+    let source_shape = source_cells.shape();
+    if source_shape.len() != 2 || source_shape[1] != 2 {
+        return Err(PyValueError::new_err("source_cells must have shape (n, 2)"));
+    }
+    if source_shape[0] == 0 {
         return Err(PyValueError::new_err(
-            "cost_surface must have the same shape as sources",
+            "at least one source cell is required",
         ));
     }
+
+    let shape = cost_surface.shape();
+    let rows = shape[0];
+    let cols = shape[1];
+    let has_elevation = elevation.is_some();
     if let Some(elevation) = &elevation {
         if elevation.shape() != shape {
             return Err(PyValueError::new_err(
-                "elevation must have the same shape as sources",
+                "elevation must have the same shape as cost_surface",
             ));
         }
     }
     if let Some(barriers) = &barriers {
         if barriers.shape() != shape {
             return Err(PyValueError::new_err(
-                "barriers must have the same shape as sources",
+                "barriers must have the same shape as cost_surface",
             ));
         }
-    }
-    if has_elevation && elevation.is_none() {
-        return Err(PyValueError::new_err(
-            "elevation is required when has_elevation is true",
-        ));
     }
     if rows == 0 || cols == 0 {
         return Err(PyValueError::new_err("input rasters must not be empty"));
@@ -1271,12 +1272,10 @@ fn distance_accumulation<'py>(
         Vec::new()
     };
     let mut valid = Vec::with_capacity(rows * cols);
-    let mut sources_flat = Vec::new();
     let mut has_blocked_cells = false;
 
     for row in 0..rows {
         for col in 0..cols {
-            let idx = row * cols + col;
             let raw_cost = cost_surface[[row, col]];
             let raw_elevation = elevation
                 .as_ref()
@@ -1300,11 +1299,17 @@ fn distance_accumulation<'py>(
                     0.0
                 });
             }
-            let source = sources[[row, col]];
-            if source.is_finite() && source != 0.0 && !blocked {
-                sources_flat.push(idx);
-            }
         }
+    }
+
+    let mut sources_flat = Vec::with_capacity(source_shape[0]);
+    for source_index in 0..source_shape[0] {
+        let row = source_cells[[source_index, 0]];
+        let col = source_cells[[source_index, 1]];
+        if row < 0 || col < 0 || row >= rows as i64 || col >= cols as i64 {
+            return Err(PyValueError::new_err("source cell is outside the raster"));
+        }
+        sources_flat.push(row as usize * cols + col as usize);
     }
 
     let solver = Solver::new(

@@ -24,7 +24,13 @@ from typing import Any, Callable
 import numpy as np
 import numpy.typing as npt
 
-from distance_rs import VerticalFactor, distance_accumulation
+from distance_rs import (
+    RasterGrid,
+    RasterSurface,
+    SolverOptions,
+    VerticalFactor,
+    distance_accumulation,
+)
 from distance_rs.baselines import (
     MIN_COST,
     WHITEBOX_NODATA,
@@ -69,6 +75,10 @@ class TimedResult:
         return min(self.times_sec)
 
 
+def source_cells(sources: npt.NDArray[np.float64]) -> npt.NDArray[np.int64]:
+    return np.argwhere((sources != 0.0) & np.isfinite(sources)).astype(np.int64)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     sizes = args.sizes
@@ -86,14 +96,18 @@ def main(argv: list[str] | None = None) -> int:
             ours = time_call(
                 lambda: (
                     distance_accumulation(
-                        case.sources,
-                        cost_surface=case.cost,
-                        elevation=case.elevation,
-                        barriers=case.barriers,
-                        vertical_factor=case.vertical_factor,
-                        cell_size=case.cell_size,
-                        search_radius=args.search_radius,
-                        use_surface_distance=case.use_surface_distance,
+                        RasterSurface(
+                            case.cost,
+                            grid=RasterGrid(cell_size=case.cell_size),
+                            elevation=case.elevation,
+                            barriers=case.barriers,
+                        ),
+                        source=source_cells(case.sources),
+                        options=SolverOptions(
+                            vertical_factor=case.vertical_factor,
+                            stencil_radius=args.search_radius,
+                            use_surface_distance=case.use_surface_distance,
+                        ),
                     ).distance
                 ),
                 repeats=args.repeats,

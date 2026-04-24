@@ -150,48 +150,45 @@ JSON summary. If Whitebox is not installed, run
 
 ## GeoTIFF Adapter
 
-Use `geo_distance_accumulation` to align cost/elevation GeoTIFFs to one raster
-grid, project GeoJSON/GeoPackage/Shapely LineString waypoints into that grid,
-and trace the result back in map coordinates:
+Use `load_surface` when you want a solver-ready raster surface from GIS files,
+and `route_path` when you want a multi-leg map-coordinate route:
 
 ```python
-from distance_rs import geo_distance_accumulation, geo_optimal_path_as_line
-
-result = geo_distance_accumulation(
-    "land_use.tif",
-    elevation_path="elevation.tif",
-    waypoints="route.gpkg",
-    land_use_costs={1: 1.0, 2: 1.8, 3: 4.0},
-    barrier_values={99},
-    crop_buffer=250.0,
-    stencil_radius=80.0,
+from distance_rs import (
+    CostRaster,
+    GeoBarriers,
+    GeoPoints,
+    GridSpec,
+    SolverOptions,
+    load_surface,
+    route_path,
 )
 
-line_map_xy = geo_optimal_path_as_line(result, reverse=True)
-```
-
-When `crop_buffer` and at least two waypoints are provided, the adapter only
-reads/reprojects the target grid cells inside the start/end bounding box
-buffered by that radius. `stencil_radius` controls the Ordered Upwind solver
-stencil in map units.
-
-For full routes through multiple waypoints, `compute_optimal_path` runs each
-consecutive leg, stitches the map-coordinate polylines, and returns leg and total
-metrics:
-
-```python
-from distance_rs import compute_optimal_path
-
-route = compute_optimal_path(
-    "cost.tif",
-    [(76.612, 39.291), (76.601, 39.303), (76.589, 39.317)],
-    barriers="barriers.geojson",
+surface = load_surface(
+    CostRaster(
+        "land_use.tif",
+        values={1: 1.0, 2: 1.8, 3: 4.0},
+        blocked_values={99},
+    ),
     elevation="elevation.tif",
-    vertical_factor="bidir_hiking_time",
-    crop_buffer=250.0,
-    stencil_radius=80.0,
+    barriers=GeoBarriers("barriers.gpkg"),
+    grid=GridSpec(resolution=1.0),
+)
+
+route = route_path(
+    CostRaster("cost.tif", values={1: 1.0, 2: 1.8, 3: 4.0}),
+    GeoPoints(
+        [(76.612, 39.291), (76.601, 39.303), (76.589, 39.317)],
+        crs="EPSG:4326",
+    ),
+    barriers=GeoBarriers("barriers.geojson"),
+    elevation="elevation.tif",
+    grid=GridSpec(margin=250.0),
+    solver=SolverOptions(
+        vertical_factor="bidir_hiking_time",
+        stencil_radius=80.0,
+    ),
     baseline_speed=5.0,
-    waypoint_crs="EPSG:4326",
 )
 
 route.path_xy
@@ -199,11 +196,13 @@ route.legs[0].metrics
 route.metrics
 ```
 
-Plain coordinate lists passed to geospatial helpers require `waypoint_crs`; use
-`EPSG:4326` for lon/lat. Cost raster values are treated as slowdown factors:
-`1.0` means baseline speed and `2.0` means twice the travel time. Most vertical
-factors are dimensionless multipliers; the hiking-time factors already produce
-hours.
+Raster paths infer CRS, transform, resolution, and bounds from the file unless
+overridden by `GridSpec`. Vector files infer CRS from file metadata; GeoJSON
+defaults to `EPSG:4326`. Plain coordinate lists and Shapely geometries must be
+wrapped in `GeoPoints(..., crs=...)` or `GeoBarriers(..., crs=...)`. `margin`
+crops each route leg to the start/end bounding box plus that many map units,
+snapped to the cost raster grid. `stencil_radius` controls the Ordered Upwind
+solver stencil in map units.
 
 To exercise the cropped GeoTIFF path on large local files, generate synthetic
 8000 x 8000 rasters at 1.5 meter resolution, route across a small corridor, and
@@ -224,29 +223,38 @@ impassable.
 
 ```python
 import numpy as np
-from distance_rs import distance_accumulation, optimal_path_as_line
-
-sources = np.zeros((100, 100), dtype=bool)
-sources[50, 50] = True
+from distance_rs import (
+    RasterGrid,
+    RasterSurface,
+    SolverOptions,
+    distance_accumulation,
+    optimal_path_as_line,
+)
 
 cost = np.ones((100, 100), dtype=float)
 elevation = np.zeros((100, 100), dtype=float)
 barriers = np.zeros((100, 100), dtype=bool)
 barriers[20:80, 40] = True
 
-result = distance_accumulation(
-    sources,
-    cost_surface=cost,
+surface = RasterSurface(
+    cost,
+    grid=RasterGrid(cell_size=1.0),
     elevation=elevation,
-    vertical_factor={"type": "bidir_hiking_time"},
     barriers=barriers,
-    cell_size=1.0,
-    search_radius=6.0,
+)
+
+result = distance_accumulation(
+    surface,
+    source=(50, 50),
+    options=SolverOptions(
+        vertical_factor={"type": "bidir_hiking_time"},
+        stencil_radius=6.0,
+    ),
 )
 
 line = optimal_path_as_line(result, destination=(90, 90))
 ```
 
-The `search_radius` controls the Ordered Upwind stencil in map units. Larger values
+The `stencil_radius` controls the Ordered Upwind stencil in map units. Larger values
 increase the accepted-front region considered for anisotropic updates and cost more
 CPU time.

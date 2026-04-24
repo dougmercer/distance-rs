@@ -1,17 +1,17 @@
-"""Geospatial adapters for preparing raster inputs for distance accumulation."""
+"""Small geospatial adapters for raster distance accumulation."""
 
 from __future__ import annotations
 
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import fiona
 import numpy as np
 import numpy.typing as npt
-import fiona
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
@@ -25,7 +25,9 @@ from rasterio.warp import (
 from shapely.geometry.base import BaseGeometry
 
 from ._distance import (
-    DistanceAccumulationResult,
+    RasterGrid,
+    RasterSurface,
+    SolverOptions,
     VerticalFactor,
     distance_accumulation,
     optimal_path_as_line,
@@ -34,123 +36,119 @@ from ._distance import (
 
 Bounds = tuple[float, float, float, float]
 Cell = tuple[int, int]
+XY = tuple[float, float]
 
 
 @dataclass(frozen=True)
-class GeoRasterData:
-    """Aligned raster arrays and waypoint cells for the core raster solver.
+class GridSpec:
+    """Target grid controls for GIS reads.
 
-    The arrays are all on the same target grid. `transform` and `crs` describe
-    that grid in map space, while `distance_kwargs()` returns only plain raster
-    arrays and cell sizes for the core solver.
+    `bounds`, when supplied, are in the target CRS. `margin` is used by
+    `route_path` to crop each leg to the start/end bounding box plus margin.
     """
 
-    land_use: npt.NDArray[np.float64]
-    cost_surface: npt.NDArray[np.float64]
-    elevation: npt.NDArray[np.float64] | None
-    barriers: npt.NDArray[np.bool_]
-    sources: npt.NDArray[np.float64]
-    waypoint_cells: tuple[Cell, ...]
-    waypoint_xy: tuple[tuple[float, float], ...]
+    crs: Any | None = None
+    resolution: float | tuple[float, float] | None = None
+    bounds: Bounds | None = None
+    margin: float | None = None
+
+
+@dataclass(frozen=True)
+class CostRaster:
+    """Raster cost input.
+
+    If `values` is supplied, cost raster values are mapped through it.
+    Otherwise raster values are used directly as traversal cost. `blocked_values`
+    are converted to barriers before solving.
+    """
+
+    path: str | Path
+    values: Mapping[float | int, float] | None = None
+    default: float | None = None
+    blocked_values: set[float | int] | Sequence[float | int] | None = None
+    resampling: str | Any = "nearest"
+    nodata_is_barrier: bool = True
+
+
+@dataclass(frozen=True)
+class ElevationRaster:
+    path: str | Path
+    resampling: str | Any = "bilinear"
+
+
+@dataclass(frozen=True)
+class GeoPoints:
+    """Point, multipoint, or line waypoint input with optional CRS/layer."""
+
+    data: Any
+    crs: Any | None = None
+    layer: str | int | None = None
+
+
+@dataclass(frozen=True)
+class GeoBarriers:
+    """Barrier vector/raster input with optional CRS/layer."""
+
+    data: Any
+    crs: Any | None = None
+    layer: str | int | None = None
+    all_touched: bool = True
+
+
+@dataclass(frozen=True)
+class GeoGrid:
+    shape: tuple[int, int]
     transform: Any
     crs: Any
     bounds: Bounds
     cell_size: tuple[float, float]
-    crop_buffer: float | None = None
-    stencil_radius: float | None = None
 
     @property
-    def source_cell(self) -> Cell | None:
-        return self.waypoint_cells[0] if self.waypoint_cells else None
+    def raster_grid(self) -> RasterGrid:
+        return RasterGrid(cell_size=self.cell_size)
 
-    @property
-    def destination_cell(self) -> Cell | None:
-        return self.waypoint_cells[-1] if len(self.waypoint_cells) >= 2 else None
-
-    def distance_kwargs(self) -> dict[str, Any]:
-        """Return keyword arguments suitable for `distance_accumulation`."""
-
-        kwargs: dict[str, Any] = {
-            "cost_surface": self.cost_surface,
-            "barriers": self.barriers,
-            "cell_size": self.cell_size,
-            "origin": (0.0, 0.0),
-        }
-        if self.elevation is not None:
-            kwargs["elevation"] = self.elevation
-        if self.stencil_radius is not None:
-            kwargs["search_radius"] = self.stencil_radius
-        return kwargs
-
-    def cell_to_xy(self, row: int, col: int, *, offset: str = "center") -> tuple[float, float]:
-        """Convert one raster cell to map coordinates in the adapter CRS."""
-
+    def cell_to_xy(self, row: int, col: int, *, offset: str = "center") -> XY:
         x_coord, y_coord = xy(self.transform, row, col, offset=offset)
         return float(x_coord), float(y_coord)
 
     def xy_to_cell(self, x: float, y: float) -> Cell:
-        """Convert one map coordinate in the adapter CRS to a raster cell."""
-
         row, col = rowcol(self.transform, x, y, op=math.floor)
-        return int(row), int(col)
+        row = int(row)
+        col = int(col)
+        height, width = self.shape
+        if row < 0 or col < 0 or row >= height or col >= width:
+            raise ValueError(f"coordinate {(x, y)} falls outside the raster grid")
+        return row, col
 
     def raster_line_to_xy(self, line_xy: npt.ArrayLike) -> npt.NDArray[np.float64]:
-        """Convert raster cell-coordinate path vertices to map-space coordinates."""
-
         line = np.asarray(line_xy, dtype=np.float64)
         if line.ndim != 2 or line.shape[1] != 2:
             raise ValueError("line_xy must have shape (n, 2)")
 
         out = np.empty_like(line, dtype=np.float64)
-        for index, (col, row) in enumerate(line):
-            out[index] = self._continuous_cell_to_xy(float(row), float(col))
+        for index, (x_coord, y_coord) in enumerate(line):
+            col = float(x_coord) / self.cell_size[0]
+            row = float(y_coord) / self.cell_size[1]
+            out[index] = self._continuous_cell_to_xy(row, col)
         return out
 
-    def _continuous_cell_to_xy(self, row: float, col: float) -> tuple[float, float]:
-        # The solver's raster coordinates treat integer row/col values as cell
-        # centers; affine geotransforms address pixel corners, so add half a cell.
-        x, y = self.transform * (col + 0.5, row + 0.5)
-        return float(x), float(y)
+    def _continuous_cell_to_xy(self, row: float, col: float) -> XY:
+        # Solver coordinates use integer row/col values at cell centers.
+        x_coord, y_coord = self.transform * (col + 0.5, row + 0.5)
+        return float(x_coord), float(y_coord)
 
 
 @dataclass(frozen=True)
-class GeoDistanceAccumulationResult:
-    """Distance accumulation result paired with its geospatial adapter."""
+class GeoSurface:
+    """Solver-ready raster surface plus the geospatial grid that produced it."""
 
-    geo: GeoRasterData
-    accumulation: DistanceAccumulationResult
-
-    @property
-    def distance(self) -> npt.NDArray[np.float64]:
-        return self.accumulation.distance
-
-    @property
-    def source_cell(self) -> Cell | None:
-        return self.geo.source_cell
-
-    @property
-    def destination_cell(self) -> Cell | None:
-        return self.geo.destination_cell
-
-    def optimal_path_as_line(
-        self,
-        destination: Cell | Sequence[Cell] | None = None,
-        *,
-        max_steps: int | None = None,
-        reverse: bool = False,
-    ) -> npt.NDArray[np.float64] | list[npt.NDArray[np.float64]]:
-        return geo_optimal_path_as_line(
-            self,
-            destination=destination,
-            max_steps=max_steps,
-            reverse=reverse,
-        )
+    surface: RasterSurface
+    grid: GeoGrid
+    land_use: npt.NDArray[np.float64]
 
 
 @dataclass(frozen=True)
 class PathMetrics:
-    """Metrics for one path or a stitched multi-leg route."""
-
     cost: float
     distance_m: float
     surface_distance_m: float
@@ -160,351 +158,174 @@ class PathMetrics:
 
 @dataclass(frozen=True)
 class OptimalPathLeg:
-    """One optimal route leg between consecutive waypoints."""
-
     index: int
-    start_xy: tuple[float, float]
-    end_xy: tuple[float, float]
+    start_xy: XY
+    end_xy: XY
     source_cell: Cell
     destination_cell: Cell
     path_xy: npt.NDArray[np.float64]
     cost: float
+    grid: GeoGrid
     metrics: PathMetrics | None
 
 
 @dataclass(frozen=True)
 class OptimalPathResult:
-    """A full optimal route stitched through all requested waypoints."""
-
     path_xy: npt.NDArray[np.float64]
     legs: tuple[OptimalPathLeg, ...]
-    waypoint_xy: tuple[tuple[float, float], ...]
+    waypoint_xy: tuple[XY, ...]
     crs: Any
     metrics: PathMetrics | None
 
 
-def prepare_geo_inputs(
-    land_use_path: str | Path,
+def load_points(points: Any, *, target_crs: Any) -> tuple[XY, ...]:
+    """Load waypoint coordinates and reproject them to `target_crs`."""
+
+    target = rasterio.crs.CRS.from_user_input(target_crs)
+    return tuple(_load_point_xy(points, target_crs=target))
+
+
+def load_surface(
+    cost: CostRaster | str | Path,
     *,
-    elevation_path: str | Path | None = None,
-    waypoints: Any | None = None,
-    land_use_costs: Mapping[float | int, float] | None = None,
-    default_cost: float | None = None,
-    barrier_values: set[float | int] | Sequence[float | int] | None = None,
+    elevation: ElevationRaster | str | Path | None = None,
     barriers: Any | None = None,
-    target_crs: Any | None = None,
-    resolution: float | tuple[float, float] | None = None,
-    bounds: Bounds | None = None,
-    bounds_crs: Any | None = None,
-    waypoint_crs: Any | None = None,
-    waypoint_layer: str | int | None = None,
-    barrier_crs: Any | None = None,
-    barrier_layer: str | int | None = None,
-    barrier_all_touched: bool = True,
-    land_use_resampling: str | Any = "nearest",
-    elevation_resampling: str | Any = "bilinear",
-    nodata_is_barrier: bool = True,
-    clear_waypoint_cells: bool = False,
-    crop_buffer: float | None = None,
-    stencil_radius: float | None = None,
-) -> GeoRasterData:
-    """Read GeoTIFF rasters and waypoint geometry onto one solver-ready grid.
+    grid: GridSpec | None = None,
+) -> GeoSurface:
+    """Read cost/elevation/barriers onto one target grid."""
 
-    Parameters are intentionally GIS-facing; the returned arrays are plain
-    NumPy rasters. If `land_use_costs` is provided, land-use class values are
-    mapped to traversal costs. Otherwise the land-use raster values are treated
-    as costs directly. Plain coordinate waypoint sequences require
-    `waypoint_crs`; pass `EPSG:4326` for lon/lat input. When `crop_buffer` is
-    provided with at least two waypoints, only target-grid cells inside the
-    first/last waypoint bounding box buffered by that radius are read and
-    reprojected. `stencil_radius` controls the ordered-upwind solver stencil.
-    `barriers` may be a GeoJSON/GeoPackage path, GeoJSON-like mapping, Shapely
-    geometry, or sequence of geometries that will be rasterized onto the same
-    cropped grid.
-    """
+    cost_spec = _cost_spec(cost)
+    elevation_spec = _elevation_spec(elevation)
+    grid_spec = grid or GridSpec()
 
-    with rasterio.open(land_use_path) as land_src:
-        target_input = target_crs or land_src.crs
-        if target_input is None:
-            raise ValueError("land-use raster has no CRS; pass target_crs explicitly")
-        target = rasterio.crs.CRS.from_user_input(target_input)
-
-        cell_size = _target_resolution(land_src, resolution)
-        crop_buffer_value = _normalize_optional_radius(crop_buffer, "crop_buffer")
-        stencil_radius_value = _normalize_optional_radius(stencil_radius, "stencil_radius")
-        resolved_waypoint_crs = _compute_waypoint_crs(waypoints, waypoint_crs)
-        waypoint_xy = _load_waypoint_xy(
-            waypoints,
+    with rasterio.open(cost_spec.path) as cost_src:
+        target = _target_crs(cost_src, grid_spec.crs, name="cost raster")
+        cell_size = _target_resolution(cost_src, grid_spec.resolution)
+        base_bounds = _target_bounds(
+            cost_src,
+            elevation_path=elevation_spec.path if elevation_spec else None,
             target_crs=target,
-            waypoint_crs=resolved_waypoint_crs,
-            waypoint_layer=waypoint_layer,
         )
-        target_bounds = _target_bounds(
-            land_src,
-            elevation_path=elevation_path,
-            target_crs=target,
-            bounds=bounds,
-            bounds_crs=bounds_crs,
+        target_bounds = (
+            _restrict_bounds_to_grid(grid_spec.bounds, base_bounds, cell_size)
+            if grid_spec.bounds is not None
+            else base_bounds
         )
         transform, width, height, adjusted_bounds = _target_grid(target_bounds, cell_size)
-        if crop_buffer_value is not None:
-            transform, width, height, adjusted_bounds = _restrict_grid_to_waypoint_radius(
-                transform=transform,
-                width=width,
-                height=height,
-                cell_size=cell_size,
-                bounds=adjusted_bounds,
-                waypoint_xy=waypoint_xy,
-                crop_buffer=crop_buffer_value,
-            )
         land_use = _read_to_grid(
-            land_src,
+            cost_src,
             transform=transform,
             crs=target,
             width=width,
             height=height,
-            resampling=land_use_resampling,
+            resampling=cost_spec.resampling,
         )
 
-    elevation = None
-    if elevation_path is not None:
-        with rasterio.open(elevation_path) as elevation_src:
-            elevation = _read_to_grid(
+    elevation_arr = None
+    if elevation_spec is not None:
+        with rasterio.open(elevation_spec.path) as elevation_src:
+            elevation_arr = _read_to_grid(
                 elevation_src,
                 transform=transform,
                 crs=target,
                 width=width,
                 height=height,
-                resampling=elevation_resampling,
+                resampling=elevation_spec.resampling,
             )
 
-    waypoint_cells = _waypoints_to_cells(waypoint_xy, transform=transform, shape=(height, width))
-
-    cost_surface, barrier_mask = _cost_and_barriers(
+    cost_arr, barrier_mask = _cost_and_barriers(
         land_use,
-        elevation=elevation,
-        land_use_costs=land_use_costs,
-        default_cost=default_cost,
-        barrier_values=barrier_values,
-        nodata_is_barrier=nodata_is_barrier,
+        elevation=elevation_arr,
+        cost_values=cost_spec.values,
+        default_cost=cost_spec.default,
+        blocked_values=cost_spec.blocked_values,
+        nodata_is_barrier=cost_spec.nodata_is_barrier,
     )
     if barriers is not None:
-        barrier_mask |= _rasterize_barriers(
+        barrier_mask |= _load_barrier_mask(
             barriers,
             transform=transform,
             crs=target,
             shape=(height, width),
-            source_crs=barrier_crs,
-            layer=barrier_layer,
-            all_touched=barrier_all_touched,
         )
-        cost_surface[barrier_mask] = np.nan
-    sources = np.zeros((height, width), dtype=np.float64)
-    if waypoint_cells:
-        if clear_waypoint_cells:
-            _clear_cells(cost_surface, barrier_mask, waypoint_cells)
-        _validate_waypoint_cells(cost_surface, barrier_mask, waypoint_cells)
-        source_row, source_col = waypoint_cells[0]
-        sources[source_row, source_col] = 1.0
+    barrier_mask = _edge_connect_barriers(barrier_mask)
+    cost_arr[barrier_mask] = np.nan
 
-    return GeoRasterData(
-        land_use=land_use,
-        cost_surface=cost_surface,
-        elevation=elevation,
-        barriers=barrier_mask,
-        sources=sources,
-        waypoint_cells=tuple(waypoint_cells),
-        waypoint_xy=tuple(waypoint_xy),
+    geo_grid = GeoGrid(
+        shape=(height, width),
         transform=transform,
         crs=target,
         bounds=adjusted_bounds,
         cell_size=cell_size,
-        crop_buffer=crop_buffer_value,
-        stencil_radius=stencil_radius_value,
     )
-
-
-def geo_distance_accumulation(
-    cost_raster: str | Path,
-    *,
-    elevation_path: str | Path | None = None,
-    waypoints: Any | None = None,
-    land_use_costs: Mapping[float | int, float] | None = None,
-    default_cost: float | None = None,
-    barrier_values: set[float | int] | Sequence[float | int] | None = None,
-    barriers: Any | None = None,
-    target_crs: Any | None = None,
-    resolution: float | tuple[float, float] | None = None,
-    bounds: Bounds | None = None,
-    bounds_crs: Any | None = None,
-    waypoint_crs: Any | None = None,
-    waypoint_layer: str | int | None = None,
-    barrier_crs: Any | None = None,
-    barrier_layer: str | int | None = None,
-    barrier_all_touched: bool = True,
-    land_use_resampling: str | Any = "nearest",
-    elevation_resampling: str | Any = "bilinear",
-    nodata_is_barrier: bool = True,
-    clear_waypoint_cells: bool = False,
-    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
-    crop_buffer: float | None = None,
-    stencil_radius: float | None = None,
-    use_surface_distance: bool = True,
-) -> GeoDistanceAccumulationResult:
-    """Run distance accumulation from geospatial raster/vector inputs."""
-
-    geo = prepare_geo_inputs(
-        cost_raster,
-        elevation_path=elevation_path,
-        waypoints=waypoints,
-        land_use_costs=land_use_costs,
-        default_cost=default_cost,
-        barrier_values=barrier_values,
-        barriers=barriers,
-        target_crs=target_crs,
-        resolution=resolution,
-        bounds=bounds,
-        bounds_crs=bounds_crs,
-        waypoint_crs=waypoint_crs,
-        waypoint_layer=waypoint_layer,
-        barrier_crs=barrier_crs,
-        barrier_layer=barrier_layer,
-        barrier_all_touched=barrier_all_touched,
-        land_use_resampling=land_use_resampling,
-        elevation_resampling=elevation_resampling,
-        nodata_is_barrier=nodata_is_barrier,
-        clear_waypoint_cells=clear_waypoint_cells,
-        crop_buffer=crop_buffer,
-        stencil_radius=stencil_radius,
+    surface = RasterSurface(
+        cost=cost_arr,
+        grid=geo_grid.raster_grid,
+        elevation=elevation_arr,
+        barriers=barrier_mask,
     )
-    accumulation = distance_accumulation(
-        geo.sources,
-        **geo.distance_kwargs(),
-        vertical_factor=vertical_factor,
-        use_surface_distance=use_surface_distance,
-    )
-    return GeoDistanceAccumulationResult(geo=geo, accumulation=accumulation)
+    return GeoSurface(surface=surface, grid=geo_grid, land_use=land_use)
 
 
-def geo_optimal_path_as_line(
-    result: GeoDistanceAccumulationResult,
-    destination: Cell | Sequence[Cell] | None = None,
-    *,
-    max_steps: int | None = None,
-    reverse: bool = False,
-) -> npt.NDArray[np.float64] | list[npt.NDArray[np.float64]]:
-    """Trace optimal paths and return coordinates in the raster's map CRS."""
-
-    if destination is None:
-        destination = result.geo.destination_cell
-    if destination is None:
-        raise ValueError("destination is required when the geo result has no destination waypoint")
-
-    line = optimal_path_as_line(result.accumulation, destination, max_steps=max_steps)
-    if isinstance(line, list):
-        converted = [
-            result.geo.raster_line_to_xy(_solver_line_to_cell_line(item, result.accumulation))
-            for item in line
-        ]
-        return [item[::-1].copy() for item in converted] if reverse else converted
-
-    converted = result.geo.raster_line_to_xy(_solver_line_to_cell_line(line, result.accumulation))
-    return converted[::-1].copy() if reverse else converted
-
-
-def compute_optimal_path(
-    cost_raster: str | Path,
+def route_path(
+    cost: CostRaster | str | Path,
     waypoints: Any,
+    *,
+    elevation: ElevationRaster | str | Path | None = None,
     barriers: Any | None = None,
-    elevation: str | Path | None = None,
-    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
-    crop_buffer: float | None = None,
-    stencil_radius: float | None = None,
+    grid: GridSpec | None = None,
+    solver: SolverOptions | None = None,
     baseline_speed: float = 5.0,
     compute_metrics: bool = True,
-    *,
-    waypoint_crs: Any | None = None,
-    waypoint_layer: str | int | None = None,
-    barrier_crs: Any | None = None,
-    barrier_layer: str | int | None = None,
-    barrier_all_touched: bool = True,
-    target_crs: Any | None = None,
-    resolution: float | tuple[float, float] | None = None,
-    land_use_costs: Mapping[float | int, float] | None = None,
-    default_cost: float | None = None,
-    barrier_values: set[float | int] | Sequence[float | int] | None = None,
-    clear_waypoint_cells: bool = False,
-    use_surface_distance: bool = True,
 ) -> OptimalPathResult:
-    """Compute and stitch optimal route legs through consecutive waypoints.
-
-    Plain coordinate lists require `waypoint_crs`; pass `EPSG:4326` for lon/lat
-    input. Shapely geometries and vector files use their own coordinates/CRS
-    unless a CRS override is provided.
-    """
+    """Compute and stitch optimal route legs through consecutive waypoints."""
 
     baseline_speed_value = float(baseline_speed)
     if baseline_speed_value <= 0.0 or not math.isfinite(baseline_speed_value):
         raise ValueError("baseline_speed must be a positive finite km/hr value")
 
-    target = _target_crs_from_raster(cost_raster, target_crs)
+    cost_spec = _cost_spec(cost)
+    grid_spec = grid or GridSpec()
+    solver_options = solver or SolverOptions()
+    with rasterio.open(cost_spec.path) as cost_src:
+        target = _target_crs(cost_src, grid_spec.crs, name="cost raster")
+
     if getattr(target, "is_geographic", False):
-        raise ValueError(
-            "compute_optimal_path expects a projected target CRS with meter-like units; "
-            "pass target_crs for geographic rasters"
-        )
-    route_waypoint_crs = _compute_waypoint_crs(waypoints, waypoint_crs)
-    waypoint_xy = _load_waypoint_xy(
-        waypoints,
-        target_crs=target,
-        waypoint_crs=route_waypoint_crs,
-        waypoint_layer=waypoint_layer,
-    )
+        raise ValueError("route_path expects a projected target CRS with meter-like units")
+
+    waypoint_xy = load_points(waypoints, target_crs=target)
     if len(waypoint_xy) < 2:
         raise ValueError("at least two waypoints are required")
 
-    crop_buffer_value = _normalize_optional_radius(crop_buffer, "crop_buffer")
-    stencil_radius_value = _normalize_optional_radius(stencil_radius, "stencil_radius")
-    route_barrier_crs = _compute_barrier_crs(barriers, barrier_crs, route_waypoint_crs)
-    vf = VerticalFactor.from_any(vertical_factor)
+    vf = VerticalFactor.from_any(solver_options.vertical_factor)
     legs: list[OptimalPathLeg] = []
     path_parts: list[npt.NDArray[np.float64]] = []
     total_metrics: PathMetrics | None = None
 
     for index, (start_xy, end_xy) in enumerate(zip(waypoint_xy, waypoint_xy[1:])):
-        leg_result = geo_distance_accumulation(
-            cost_raster,
-            elevation_path=elevation,
-            waypoints=[start_xy, end_xy],
-            waypoint_crs=target,
-            land_use_costs=land_use_costs,
-            default_cost=default_cost,
-            barrier_values=barrier_values,
+        leg_grid = _leg_grid_spec(grid_spec, target, start_xy, end_xy)
+        geo = load_surface(
+            cost_spec,
+            elevation=elevation,
             barriers=barriers,
-            target_crs=target,
-            resolution=resolution,
-            barrier_crs=route_barrier_crs,
-            barrier_layer=barrier_layer,
-            barrier_all_touched=barrier_all_touched,
-            clear_waypoint_cells=clear_waypoint_cells,
-            vertical_factor=vf,
-            crop_buffer=crop_buffer_value,
-            stencil_radius=stencil_radius_value,
-            use_surface_distance=use_surface_distance,
+            grid=leg_grid,
         )
-        if leg_result.source_cell is None or leg_result.destination_cell is None:
-            raise ValueError("each route leg must have source and destination cells")
+        source_cell = geo.grid.xy_to_cell(*start_xy)
+        destination_cell = geo.grid.xy_to_cell(*end_xy)
+        _validate_endpoint(geo, source_cell, "source")
+        _validate_endpoint(geo, destination_cell, "destination")
 
-        path_xy = geo_optimal_path_as_line(leg_result, reverse=True)
-        if isinstance(path_xy, list):
+        accumulation = distance_accumulation(geo.surface, source_cell, options=solver_options)
+        path_cell_xy = optimal_path_as_line(accumulation, destination_cell)
+        if isinstance(path_cell_xy, list):
             raise RuntimeError("single destination unexpectedly produced multiple paths")
-
-        cost = _destination_cost(leg_result)
+        path_xy = geo.grid.raster_line_to_xy(path_cell_xy)[::-1].copy()
+        cost_value = _destination_cost(accumulation.distance, destination_cell)
         metrics = (
             _path_metrics(
                 path_xy,
-                cost=cost,
-                geo=leg_result.geo,
+                cost=cost_value,
+                geo=geo,
                 vertical_factor=vf,
                 baseline_speed_kmh=baseline_speed_value,
             )
@@ -512,110 +333,85 @@ def compute_optimal_path(
             else None
         )
         if metrics is not None:
-            total_metrics = metrics if total_metrics is None else _combine_metrics(total_metrics, metrics)
+            total_metrics = (
+                metrics if total_metrics is None else _combine_metrics(total_metrics, metrics)
+            )
 
-        leg = OptimalPathLeg(
-            index=index,
-            start_xy=start_xy,
-            end_xy=end_xy,
-            source_cell=leg_result.source_cell,
-            destination_cell=leg_result.destination_cell,
-            path_xy=path_xy,
-            cost=cost,
-            metrics=metrics,
+        legs.append(
+            OptimalPathLeg(
+                index=index,
+                start_xy=start_xy,
+                end_xy=end_xy,
+                source_cell=source_cell,
+                destination_cell=destination_cell,
+                path_xy=path_xy,
+                cost=cost_value,
+                grid=geo.grid,
+                metrics=metrics,
+            )
         )
-        legs.append(leg)
         path_parts.append(path_xy if not path_parts else path_xy[1:])
 
     full_path = np.vstack(path_parts) if path_parts else np.empty((0, 2), dtype=np.float64)
     return OptimalPathResult(
         path_xy=full_path,
         legs=tuple(legs),
-        waypoint_xy=tuple(waypoint_xy),
+        waypoint_xy=waypoint_xy,
         crs=target,
         metrics=total_metrics,
     )
 
 
-def _target_crs_from_raster(path: str | Path, target_crs: Any | None) -> Any:
-    with rasterio.open(path) as dataset:
-        target_input = target_crs or dataset.crs
-        if target_input is None:
-            raise ValueError("cost raster has no CRS; pass target_crs explicitly")
+def _cost_spec(cost: CostRaster | str | Path) -> CostRaster:
+    return cost if isinstance(cost, CostRaster) else CostRaster(cost)
+
+
+def _elevation_spec(elevation: ElevationRaster | str | Path | None) -> ElevationRaster | None:
+    if elevation is None:
+        return None
+    return elevation if isinstance(elevation, ElevationRaster) else ElevationRaster(elevation)
+
+
+def _target_crs(dataset: Any, crs: Any | None, *, name: str) -> Any:
+    target_input = crs or dataset.crs
+    if target_input is None:
+        raise ValueError(f"{name} has no CRS; pass GridSpec(crs=...)")
     return rasterio.crs.CRS.from_user_input(target_input)
 
 
-def _compute_waypoint_crs(waypoints: Any, waypoint_crs: Any | None) -> Any | None:
-    if waypoint_crs is not None:
-        return waypoint_crs
-    if _is_plain_xy_sequence(waypoints):
-        raise ValueError(
-            "plain coordinate waypoint sequences require waypoint_crs; "
-            "pass 'EPSG:4326' for lon/lat input"
+def _leg_grid_spec(grid: GridSpec, target_crs: Any, start_xy: XY, end_xy: XY) -> GridSpec:
+    margin = _normalize_optional_radius(grid.margin, "margin")
+    bounds = grid.bounds
+    if margin is not None:
+        bounds = (
+            min(start_xy[0], end_xy[0]) - margin,
+            min(start_xy[1], end_xy[1]) - margin,
+            max(start_xy[0], end_xy[0]) + margin,
+            max(start_xy[1], end_xy[1]) + margin,
         )
-    return None
+    return replace(grid, crs=target_crs, bounds=bounds)
 
 
-def _compute_barrier_crs(
-    barriers: Any | None,
-    barrier_crs: Any | None,
-    waypoint_crs: Any | None,
-) -> Any | None:
-    if barrier_crs is not None or barriers is None:
-        return barrier_crs
-    if isinstance(barriers, str | Path):
-        return None
-    if isinstance(barriers, Mapping) and _geojson_crs(barriers) is not None:
-        return None
-    return waypoint_crs
+def _validate_endpoint(geo: GeoSurface, cell: Cell, name: str) -> None:
+    row, col = cell
+    if geo.surface.barriers is not None and bool(geo.surface.barriers[row, col]):
+        raise ValueError(f"{name} cell {cell} is blocked")
+    if not math.isfinite(float(np.asarray(geo.surface.cost)[row, col])):
+        raise ValueError(f"{name} cell {cell} has no finite cost")
 
 
-def _is_plain_xy_sequence(value: Any) -> bool:
-    if isinstance(value, str | bytes | Path | Mapping):
-        return False
-    if isinstance(value, BaseGeometry) or hasattr(value, "__geo_interface__"):
-        return False
-    if not isinstance(value, Sequence) or len(value) == 0:
-        return False
-    first = value[0]
-    if not isinstance(first, Sequence) or isinstance(first, str | bytes):
-        return False
-    if len(first) < 2:
-        return False
-    try:
-        float(first[0])
-        float(first[1])
-    except (TypeError, ValueError):
-        return False
-    return True
-
-
-def _destination_cost(result: GeoDistanceAccumulationResult) -> float:
-    if result.destination_cell is None:
-        raise ValueError("destination waypoint is required")
-    row, col = result.destination_cell
-    cost = float(result.distance[row, col])
-    if not math.isfinite(cost):
+def _destination_cost(distance: npt.NDArray[np.float64], cell: Cell) -> float:
+    value = float(distance[cell])
+    if not math.isfinite(value):
         raise ValueError("destination has no finite accumulated cost")
-    return cost
-
-
-def _solver_line_to_cell_line(
-    line_xy: npt.NDArray[np.float64],
-    result: DistanceAccumulationResult,
-) -> npt.NDArray[np.float64]:
-    line = np.asarray(line_xy, dtype=np.float64)
-    out = np.empty_like(line)
-    out[:, 0] = (line[:, 0] - result.origin[0]) / result.cell_size[0]
-    out[:, 1] = (line[:, 1] - result.origin[1]) / result.cell_size[1]
-    return out
+    return value
 
 
 def _path_metrics(
     path_xy: npt.NDArray[np.float64],
     *,
     cost: float,
-    geo: GeoRasterData,
+    geo: GeoSurface,
     vertical_factor: VerticalFactor,
     baseline_speed_kmh: float,
 ) -> PathMetrics:
@@ -656,9 +452,10 @@ def _path_distance(path_xy: npt.NDArray[np.float64]) -> float:
     return float(np.hypot(delta[:, 0], delta[:, 1]).sum())
 
 
-def _path_surface_distance(path_xy: npt.NDArray[np.float64], geo: GeoRasterData) -> float:
+def _path_surface_distance(path_xy: npt.NDArray[np.float64], geo: GeoSurface) -> float:
     plan_distances = _segment_plan_distances(path_xy)
-    if geo.elevation is None or plan_distances.size == 0:
+    elevation = geo.surface.elevation
+    if elevation is None or plan_distances.size == 0:
         return float(plan_distances.sum())
 
     elevations = _sample_elevation(path_xy, geo)
@@ -676,20 +473,21 @@ def _segment_plan_distances(path_xy: npt.NDArray[np.float64]) -> npt.NDArray[np.
     return np.hypot(delta[:, 0], delta[:, 1])
 
 
-def _sample_elevation(path_xy: npt.NDArray[np.float64], geo: GeoRasterData) -> npt.NDArray[np.float64]:
-    if geo.elevation is None:
+def _sample_elevation(path_xy: npt.NDArray[np.float64], geo: GeoSurface) -> npt.NDArray[np.float64]:
+    elevation = geo.surface.elevation
+    if elevation is None:
         return np.full(len(path_xy), np.nan, dtype=np.float64)
     rows, cols = rowcol(
-        geo.transform,
+        geo.grid.transform,
         path_xy[:, 0].tolist(),
         path_xy[:, 1].tolist(),
         op=math.floor,
     )
-    height, width = geo.elevation.shape
+    height, width = elevation.shape
     out = np.full(len(path_xy), np.nan, dtype=np.float64)
     for index, (row, col) in enumerate(zip(rows, cols)):
         if 0 <= row < height and 0 <= col < width:
-            out[index] = float(geo.elevation[int(row), int(col)])
+            out[index] = float(elevation[int(row), int(col)])
     return out
 
 
@@ -725,32 +523,54 @@ def _target_resolution(
         y_res = float(resolution[1])
     else:
         x_res = y_res = float(resolution)
-    if x_res <= 0.0 or y_res <= 0.0:
-        raise ValueError("resolution values must be positive")
+    if x_res <= 0.0 or y_res <= 0.0 or not math.isfinite(x_res) or not math.isfinite(y_res):
+        raise ValueError("resolution values must be positive finite values")
     return x_res, y_res
 
 
 def _target_bounds(
-    land_src: Any,
+    cost_src: Any,
     *,
     elevation_path: str | Path | None,
     target_crs: Any,
-    bounds: Bounds | None,
-    bounds_crs: Any | None,
 ) -> Bounds:
-    if bounds is not None:
-        source_crs = rasterio.crs.CRS.from_user_input(bounds_crs or target_crs)
-        if source_crs != target_crs:
-            return tuple(transform_bounds(source_crs, target_crs, *bounds, densify_pts=21))  # type: ignore[return-value]
-        return tuple(float(value) for value in bounds)  # type: ignore[return-value]
-
-    land_bounds = _dataset_bounds_in_crs(land_src, target_crs)
+    cost_bounds = _dataset_bounds_in_crs(cost_src, target_crs)
     if elevation_path is None:
-        return land_bounds
+        return cost_bounds
 
     with rasterio.open(elevation_path) as elevation_src:
         elevation_bounds = _dataset_bounds_in_crs(elevation_src, target_crs)
-    return _intersect_bounds(land_bounds, elevation_bounds)
+    return _intersect_bounds(cost_bounds, elevation_bounds)
+
+
+def _restrict_bounds_to_grid(
+    requested: Bounds,
+    base_bounds: Bounds,
+    cell_size: tuple[float, float],
+) -> Bounds:
+    left, bottom, right, top = requested
+    base_left, base_bottom, base_right, base_top = base_bounds
+    x_res, y_res = cell_size
+    base_width = int(math.floor((base_right - base_left) / x_res))
+    base_height = int(math.floor((base_top - base_bottom) / y_res))
+
+    col_start = max(0, int(math.floor((left - base_left) / x_res)))
+    col_stop = min(base_width, int(math.ceil((right - base_left) / x_res)))
+    row_start = max(0, int(math.floor((base_top - top) / y_res)))
+    row_stop = min(base_height, int(math.ceil((base_top - bottom) / y_res)))
+    if row_start >= row_stop or col_start >= col_stop:
+        raise ValueError("requested bounds do not overlap the target raster grid")
+
+    snapped_left = base_left + col_start * x_res
+    snapped_top = base_top - row_start * y_res
+    snapped_width = col_stop - col_start
+    snapped_height = row_stop - row_start
+    return (
+        snapped_left,
+        snapped_top - snapped_height * y_res,
+        snapped_left + snapped_width * x_res,
+        snapped_top,
+    )
 
 
 def _dataset_bounds_in_crs(dataset: Any, target_crs: Any) -> Bounds:
@@ -772,7 +592,7 @@ def _intersect_bounds(first: Bounds, second: Bounds) -> Bounds:
     right = min(first[2], second[2])
     top = min(first[3], second[3])
     if left >= right or bottom >= top:
-        raise ValueError("land-use and elevation rasters do not overlap in the target CRS")
+        raise ValueError("cost and elevation rasters do not overlap in the target CRS")
     return left, bottom, right, top
 
 
@@ -784,8 +604,7 @@ def _target_grid(bounds: Bounds, cell_size: tuple[float, float]) -> tuple[Any, i
     if width <= 0 or height <= 0:
         raise ValueError("target bounds are smaller than one output cell")
     adjusted_bounds = (left, top - height * y_res, left + width * x_res, top)
-    transform = from_origin(left, top, x_res, y_res)
-    return transform, width, height, adjusted_bounds
+    return from_origin(left, top, x_res, y_res), width, height, adjusted_bounds
 
 
 def _normalize_optional_radius(radius: float | None, name: str) -> float | None:
@@ -795,62 +614,6 @@ def _normalize_optional_radius(radius: float | None, name: str) -> float | None:
     if value <= 0.0 or not math.isfinite(value):
         raise ValueError(f"{name} must be a positive finite value")
     return value
-
-
-def _restrict_grid_to_waypoint_radius(
-    *,
-    transform: Any,
-    width: int,
-    height: int,
-    cell_size: tuple[float, float],
-    bounds: Bounds,
-    waypoint_xy: Sequence[tuple[float, float]],
-    crop_buffer: float,
-) -> tuple[Any, int, int, Bounds]:
-    if len(waypoint_xy) < 2:
-        return transform, width, height, bounds
-
-    left, bottom, right, top = _waypoint_search_bounds(waypoint_xy, crop_buffer)
-    base_left, _, _, base_top = bounds
-    x_res, y_res = cell_size
-
-    col_start = max(0, int(math.floor((left - base_left) / x_res)))
-    col_stop = min(width, int(math.ceil((right - base_left) / x_res)))
-    row_start = max(0, int(math.floor((base_top - top) / y_res)))
-    row_stop = min(height, int(math.ceil((base_top - bottom) / y_res)))
-
-    if row_start >= row_stop or col_start >= col_stop:
-        raise ValueError("waypoint crop-buffer bounds do not overlap the target raster grid")
-
-    cropped_left = base_left + col_start * x_res
-    cropped_top = base_top - row_start * y_res
-    cropped_width = col_stop - col_start
-    cropped_height = row_stop - row_start
-    cropped_bounds = (
-        cropped_left,
-        cropped_top - cropped_height * y_res,
-        cropped_left + cropped_width * x_res,
-        cropped_top,
-    )
-    return (
-        from_origin(cropped_left, cropped_top, x_res, y_res),
-        cropped_width,
-        cropped_height,
-        cropped_bounds,
-    )
-
-
-def _waypoint_search_bounds(
-    waypoint_xy: Sequence[tuple[float, float]], crop_buffer: float
-) -> Bounds:
-    start_x, start_y = waypoint_xy[0]
-    end_x, end_y = waypoint_xy[-1]
-    return (
-        min(start_x, end_x) - crop_buffer,
-        min(start_y, end_y) - crop_buffer,
-        max(start_x, end_x) + crop_buffer,
-        max(start_y, end_y) + crop_buffer,
-    )
 
 
 def _read_to_grid(
@@ -888,29 +651,29 @@ def _resampling_from_any(value: str | Any) -> Any:
 
 
 def _cost_and_barriers(
-    land_use: npt.NDArray[np.float64],
+    values: npt.NDArray[np.float64],
     *,
     elevation: npt.NDArray[np.float64] | None,
-    land_use_costs: Mapping[float | int, float] | None,
+    cost_values: Mapping[float | int, float] | None,
     default_cost: float | None,
-    barrier_values: set[float | int] | Sequence[float | int] | None,
+    blocked_values: set[float | int] | Sequence[float | int] | None,
     nodata_is_barrier: bool,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
-    if land_use_costs is None:
-        cost = land_use.astype(np.float64, copy=True)
+    if cost_values is None:
+        cost = values.astype(np.float64, copy=True)
     else:
         fill_value = np.nan if default_cost is None else float(default_cost)
-        cost = np.full(land_use.shape, fill_value, dtype=np.float64)
-        for raw_value, mapped_cost in land_use_costs.items():
-            cost[land_use == float(raw_value)] = float(mapped_cost)
+        cost = np.full(values.shape, fill_value, dtype=np.float64)
+        for raw_value, mapped_cost in cost_values.items():
+            cost[values == float(raw_value)] = float(mapped_cost)
 
-    barriers = np.zeros(land_use.shape, dtype=np.bool_)
-    if barrier_values is not None:
-        for raw_value in barrier_values:
-            barriers |= land_use == float(raw_value)
+    barriers = np.zeros(values.shape, dtype=np.bool_)
+    if blocked_values is not None:
+        for raw_value in blocked_values:
+            barriers |= values == float(raw_value)
 
     if nodata_is_barrier:
-        barriers |= ~np.isfinite(land_use) | ~np.isfinite(cost)
+        barriers |= ~np.isfinite(values) | ~np.isfinite(cost)
         if elevation is not None:
             barriers |= ~np.isfinite(elevation)
 
@@ -918,21 +681,34 @@ def _cost_and_barriers(
     return cost, barriers
 
 
-def _rasterize_barriers(
-    barriers: Any,
+def _load_barrier_mask(
+    value: Any,
     *,
     transform: Any,
     crs: Any,
     shape: tuple[int, int],
-    source_crs: Any | None,
-    layer: str | int | None,
-    all_touched: bool,
 ) -> npt.NDArray[np.bool_]:
+    if _is_sequence_of_inputs(value):
+        mask = np.zeros(shape, dtype=np.bool_)
+        for item in value:
+            mask |= _load_barrier_mask(item, transform=transform, crs=crs, shape=shape)
+        return mask
+
+    wrapped = value if isinstance(value, GeoBarriers) else GeoBarriers(value)
+    data = wrapped.data
+    if isinstance(data, str | Path) and _is_raster_path(Path(data)):
+        return _read_barrier_raster(
+            Path(data),
+            transform=transform,
+            crs=crs,
+            shape=shape,
+        )
+
     geometries = _load_geometries(
-        barriers,
+        wrapped.data,
         target_crs=crs,
-        source_crs=source_crs,
-        layer=layer,
+        source_crs=wrapped.crs,
+        layer=wrapped.layer,
     )
     if not geometries:
         return np.zeros(shape, dtype=np.bool_)
@@ -942,10 +718,42 @@ def _rasterize_barriers(
         out_shape=shape,
         transform=transform,
         fill=0,
-        all_touched=all_touched,
+        all_touched=wrapped.all_touched,
         dtype=np.uint8,
     )
     return burned.astype(np.bool_)
+
+
+def _read_barrier_raster(
+    path: Path,
+    *,
+    transform: Any,
+    crs: Any,
+    shape: tuple[int, int],
+) -> npt.NDArray[np.bool_]:
+    height, width = shape
+    with rasterio.open(path) as dataset:
+        values = _read_to_grid(
+            dataset,
+            transform=transform,
+            crs=crs,
+            width=width,
+            height=height,
+            resampling="nearest",
+        )
+    return np.isfinite(values) & (values != 0.0)
+
+
+def _edge_connect_barriers(barriers: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
+    connected = barriers.copy()
+    down_diag = barriers[:-1, :-1] & barriers[1:, 1:]
+    connected[:-1, 1:] |= down_diag
+    connected[1:, :-1] |= down_diag
+
+    up_diag = barriers[1:, :-1] & barriers[:-1, 1:]
+    connected[:-1, :-1] |= up_diag
+    connected[1:, 1:] |= up_diag
+    return connected
 
 
 def _load_geometries(
@@ -955,23 +763,33 @@ def _load_geometries(
     source_crs: Any | None,
     layer: str | int | None,
 ) -> list[Mapping[str, Any]]:
-    geometry_crs = source_crs
+    if isinstance(value, GeoBarriers):
+        return _load_geometries(
+            value.data,
+            target_crs=target_crs,
+            source_crs=value.crs,
+            layer=value.layer,
+        )
     if isinstance(value, str | Path):
         path = Path(value)
-        if path.suffix.lower() == ".gpkg":
-            geometries, geometry_crs = _read_vector_file(path, layer=layer)
-        else:
+        if _is_geojson_path(path):
             geometry, file_crs = _read_geojson(path)
             geometry_crs = source_crs or file_crs
             geometries = _geometries_from_geometry(geometry)
+        else:
+            geometries, geometry_crs = _read_vector_file(path, layer=layer)
+            geometry_crs = source_crs or geometry_crs
     elif isinstance(value, Mapping):
-        geometry_crs = source_crs or _geojson_crs(value)
+        geometry_crs = source_crs or _geojson_crs(value) or "EPSG:4326"
         geometries = _geometries_from_geometry(value)
-    elif isinstance(value, BaseGeometry):
+    elif isinstance(value, BaseGeometry) or hasattr(value, "__geo_interface__"):
+        if source_crs is None:
+            raise ValueError(
+                "geometry barriers without file metadata require GeoBarriers(..., crs=...)"
+            )
         geometries = [value.__geo_interface__]
-    elif hasattr(value, "__geo_interface__"):
-        geometries = [value.__geo_interface__]
-    elif isinstance(value, Sequence):
+        geometry_crs = source_crs
+    elif _is_sequence_of_inputs(value):
         geometries = []
         for item in value:
             geometries.extend(
@@ -984,27 +802,86 @@ def _load_geometries(
             )
         return geometries
     else:
-        raise TypeError(
-            "barriers must be a path, GeoJSON-like mapping, geometry, or sequence of geometries"
-        )
+        raise TypeError("barriers must be a raster path, vector path, geometry, or sequence")
 
     if not geometries:
         return []
 
-    resolved_source_crs = _resolve_geometry_crs(geometry_crs, target_crs)
+    resolved_source_crs = rasterio.crs.CRS.from_user_input(geometry_crs)
     if resolved_source_crs == target_crs:
         return geometries
-
     return [
         transform_geom(resolved_source_crs, target_crs, geometry)  # type: ignore[arg-type]
         for geometry in geometries
     ]
 
 
-def _resolve_geometry_crs(source_crs: Any | None, target_crs: Any) -> Any:
-    if source_crs is None:
-        return target_crs
-    return rasterio.crs.CRS.from_user_input(source_crs)
+def _load_point_xy(points: Any, *, target_crs: Any) -> list[XY]:
+    wrapped = points if isinstance(points, GeoPoints) else GeoPoints(points)
+    value = wrapped.data
+    geometry_crs = wrapped.crs
+
+    if isinstance(value, str | Path):
+        path = Path(value)
+        if _is_geojson_path(path):
+            geometry, file_crs = _read_geojson(path)
+            geometry_crs = geometry_crs or file_crs
+            coords = _coords_from_geometry(geometry)
+        else:
+            geometries, file_crs = _read_vector_file(path, layer=wrapped.layer)
+            geometry_crs = geometry_crs or file_crs
+            coords = [coord for geometry in geometries for coord in _coords_from_geometry(geometry)]
+    elif isinstance(value, Mapping):
+        geometry_crs = geometry_crs or _geojson_crs(value) or "EPSG:4326"
+        coords = _coords_from_geometry(value)
+    elif isinstance(value, BaseGeometry) or hasattr(value, "__geo_interface__"):
+        if geometry_crs is None:
+            raise ValueError("geometry waypoints require GeoPoints(..., crs=...)")
+        coords = _coords_from_geometry(value.__geo_interface__)
+    else:
+        if geometry_crs is None:
+            raise ValueError("plain coordinate waypoints require GeoPoints(..., crs=...)")
+        coords = _coords_from_sequence(value)
+
+    if not coords:
+        return []
+    if geometry_crs is None:
+        raise ValueError("waypoint input has no CRS; pass GeoPoints(..., crs=...)")
+    source_crs = rasterio.crs.CRS.from_user_input(geometry_crs)
+    if source_crs == target_crs:
+        return [(float(x_coord), float(y_coord)) for x_coord, y_coord in coords]
+
+    xs, ys = zip(*coords)
+    out_xs, out_ys = transform_coords(source_crs, target_crs, xs, ys)
+    return [(float(x_coord), float(y_coord)) for x_coord, y_coord in zip(out_xs, out_ys)]
+
+
+def _read_geojson(path: Path) -> tuple[Mapping[str, Any], Any | None]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    crs = _geojson_crs(data)
+    return data, crs or "EPSG:4326"
+
+
+def _geojson_crs(data: Mapping[str, Any]) -> Any | None:
+    crs = data.get("crs")
+    if not isinstance(crs, Mapping):
+        return None
+    properties = crs.get("properties")
+    if isinstance(properties, Mapping) and "name" in properties:
+        return properties["name"]
+    return None
+
+
+def _read_vector_file(
+    path: Path, *, layer: str | int | None
+) -> tuple[list[Mapping[str, Any]], Any]:
+    open_kwargs = {"layer": layer} if layer is not None else {}
+    with fiona.open(path, **open_kwargs) as collection:
+        crs = collection.crs_wkt or collection.crs
+        geometries = [feature["geometry"] for feature in collection if feature.get("geometry")]
+    if crs is None:
+        raise ValueError(f"{path} has no CRS")
+    return geometries, crs
 
 
 def _geometries_from_geometry(geometry: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -1036,83 +913,10 @@ def _geometries_from_geometry(geometry: Mapping[str, Any]) -> list[Mapping[str, 
     raise ValueError(f"barrier geometry type {kind!r} is not supported")
 
 
-def _load_waypoint_xy(
-    waypoints: Any | None,
-    *,
-    target_crs: Any,
-    waypoint_crs: Any | None,
-    waypoint_layer: str | int | None,
-) -> list[tuple[float, float]]:
-    if waypoints is None:
-        return []
-
-    geometry_crs = waypoint_crs
-    if isinstance(waypoints, str | Path):
-        path = Path(waypoints)
-        if path.suffix.lower() == ".gpkg":
-            geometries, geometry_crs = _read_vector_file(path, layer=waypoint_layer)
-            coords = [coord for geometry in geometries for coord in _coords_from_geometry(geometry)]
-        else:
-            geometry, file_crs = _read_geojson(path)
-            geometry_crs = waypoint_crs or file_crs
-            coords = _coords_from_geometry(geometry)
-    elif isinstance(waypoints, Mapping):
-        coords = _coords_from_geometry(waypoints)
-    elif isinstance(waypoints, BaseGeometry):
-        coords = _coords_from_geometry(waypoints.__geo_interface__)
-    elif hasattr(waypoints, "__geo_interface__"):
-        coords = _coords_from_geometry(waypoints.__geo_interface__)
-    else:
-        coords = _coords_from_sequence(waypoints)
-
-    if not coords:
-        return []
-
-    source_crs = _resolve_waypoint_crs(geometry_crs, target_crs)
-    if source_crs == target_crs:
-        return [(float(x), float(y)) for x, y in coords]
-
-    xs, ys = zip(*coords)
-    out_xs, out_ys = transform_coords(source_crs, target_crs, xs, ys)
-    return [(float(x), float(y)) for x, y in zip(out_xs, out_ys)]
-
-
-def _resolve_waypoint_crs(source_crs: Any | None, target_crs: Any) -> Any:
-    if source_crs is None:
-        return target_crs
-    return rasterio.crs.CRS.from_user_input(source_crs)
-
-
-def _read_geojson(path: Path) -> tuple[Mapping[str, Any], Any | None]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    crs = _geojson_crs(data)
-    return data, crs or "EPSG:4326"
-
-
-def _geojson_crs(data: Mapping[str, Any]) -> Any | None:
-    crs = data.get("crs")
-    if not isinstance(crs, Mapping):
-        return None
-    properties = crs.get("properties")
-    if isinstance(properties, Mapping) and "name" in properties:
-        return properties["name"]
-    return None
-
-
-def _read_vector_file(
-    path: Path, *, layer: str | int | None
-) -> tuple[list[Mapping[str, Any]], Any]:
-    open_kwargs = {"layer": layer} if layer is not None else {}
-    with fiona.open(path, **open_kwargs) as collection:
-        crs = collection.crs_wkt or collection.crs
-        geometries = [feature["geometry"] for feature in collection if feature.get("geometry")]
-    return geometries, crs
-
-
-def _coords_from_geometry(geometry: Mapping[str, Any]) -> list[tuple[float, float]]:
+def _coords_from_geometry(geometry: Mapping[str, Any]) -> list[XY]:
     kind = str(geometry.get("type", ""))
     if kind == "FeatureCollection":
-        coords: list[tuple[float, float]] = []
+        coords: list[XY] = []
         for feature in geometry.get("features", []):
             coords.extend(_coords_from_geometry(feature))
         return coords
@@ -1137,68 +941,31 @@ def _coords_from_geometry(geometry: Mapping[str, Any]) -> list[tuple[float, floa
     raise ValueError(f"waypoint geometry type {kind!r} is not supported")
 
 
-def _coords_from_sequence(value: Any) -> list[tuple[float, float]]:
+def _coords_from_sequence(value: Any) -> list[XY]:
     if not isinstance(value, Sequence):
-        raise TypeError(
-            "waypoints must be a path, GeoJSON-like mapping, geometry, or coordinate sequence"
-        )
-    coords = [_xy_pair(item) for item in value]
-    return coords
+        raise TypeError("waypoints must be a path, GeoJSON-like mapping, geometry, or coordinates")
+    return [_xy_pair(item) for item in value]
 
 
-def _xy_pair(value: Any) -> tuple[float, float]:
+def _xy_pair(value: Any) -> XY:
     if not isinstance(value, Sequence) or len(value) < 2:
-        raise ValueError(f"invalid waypoint coordinate: {value!r}")
+        raise ValueError(f"invalid coordinate: {value!r}")
     return float(value[0]), float(value[1])
 
 
-def _waypoints_to_cells(
-    waypoint_xy: Sequence[tuple[float, float]],
-    *,
-    transform: Any,
-    shape: tuple[int, int],
-) -> list[Cell]:
-    if not waypoint_xy:
-        return []
-
-    rows, cols = rowcol(
-        transform,
-        [xy[0] for xy in waypoint_xy],
-        [xy[1] for xy in waypoint_xy],
-        op=math.floor,
+def _is_sequence_of_inputs(value: Any) -> bool:
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, str | bytes | Path)
+        and not isinstance(value, Mapping)
+        and not isinstance(value, BaseGeometry)
+        and not hasattr(value, "__geo_interface__")
     )
-    cells = [(int(row), int(col)) for row, col in zip(rows, cols)]
-    height, width = shape
-    out: list[Cell] = []
-    for row, col in cells:
-        if row < 0 or col < 0 or row >= height or col >= width:
-            raise ValueError(f"waypoint {(row, col)} falls outside the aligned raster grid")
-        if not out or out[-1] != (row, col):
-            out.append((row, col))
-    return out
 
 
-def _clear_cells(
-    cost_surface: npt.NDArray[np.float64],
-    barriers: npt.NDArray[np.bool_],
-    cells: Sequence[Cell],
-) -> None:
-    finite_costs = cost_surface[np.isfinite(cost_surface)]
-    fallback_cost = float(np.median(finite_costs)) if finite_costs.size else 1.0
-    for row, col in cells:
-        barriers[row, col] = False
-        if not math.isfinite(float(cost_surface[row, col])):
-            cost_surface[row, col] = fallback_cost
+def _is_geojson_path(path: Path) -> bool:
+    return path.suffix.lower() in {".json", ".geojson"}
 
 
-def _validate_waypoint_cells(
-    cost_surface: npt.NDArray[np.float64],
-    barriers: npt.NDArray[np.bool_],
-    cells: Sequence[Cell],
-) -> None:
-    for row, col in cells:
-        if barriers[row, col] or not math.isfinite(float(cost_surface[row, col])):
-            raise ValueError(
-                f"waypoint cell {(row, col)} is blocked or NoData; "
-                "pass clear_waypoint_cells=True to force it open"
-            )
+def _is_raster_path(path: Path) -> bool:
+    return path.suffix.lower() in {".tif", ".tiff", ".img", ".vrt"}

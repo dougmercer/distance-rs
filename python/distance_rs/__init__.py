@@ -5,6 +5,9 @@ from typing import Any
 
 from ._distance import (
     DistanceAccumulationResult,
+    RasterGrid,
+    RasterSurface,
+    SolverOptions,
     VerticalFactor,
     distance_accumulation,
     optimal_path_as_line,
@@ -17,20 +20,27 @@ from .baselines import (
 )
 
 _GEO_EXPORTS = {
-    "GeoDistanceAccumulationResult",
-    "GeoRasterData",
+    "CostRaster",
+    "ElevationRaster",
+    "GeoBarriers",
+    "GeoGrid",
+    "GeoPoints",
+    "GeoSurface",
+    "GridSpec",
     "OptimalPathLeg",
     "OptimalPathResult",
     "PathMetrics",
-    "compute_optimal_path",
-    "geo_distance_accumulation",
-    "geo_optimal_path_as_line",
-    "prepare_geo_inputs",
+    "load_points",
+    "load_surface",
+    "route_path",
 }
 
 __all__ = [
     "DistanceAccumulationResult",
+    "RasterGrid",
+    "RasterSurface",
     "RasterDijkstraResult",
+    "SolverOptions",
     "VerticalFactor",
     "distance_accumulation",
     "optimal_path_as_line",
