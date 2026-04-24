@@ -219,7 +219,7 @@ def make_five_mile_case(
     for center_x, center_y, radius_x, radius_y, penalty in [
         (0.18, -0.18, 0.055, 0.22, 1.10),
         (0.39, 0.20, 0.070, 0.18, 0.85),
-        (0.64, -0.16, 0.080, 0.24, 1.25),
+        (0.64, -0.16, 0.080, 0.24, 1.10),
         (0.83, 0.12, 0.060, 0.20, 0.95),
     ]:
         ellipse = ((normalized_x - center_x) / radius_x) ** 2 + (
