@@ -52,8 +52,6 @@ pub(crate) struct TraceRequest<'a> {
     pub(crate) distance: ArrayView2<'a, f64>,
     pub(crate) back_direction: ArrayView2<'a, f64>,
     pub(crate) parent_a: ArrayView2<'a, i64>,
-    pub(crate) parent_b: ArrayView2<'a, i64>,
-    pub(crate) parent_weight: ArrayView2<'a, f64>,
     pub(crate) start_row: isize,
     pub(crate) start_col: isize,
     pub(crate) cell_size_x: f64,
@@ -68,11 +66,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
     let rows = shape[0];
     let cols = shape[1];
 
-    if request.back_direction.shape() != shape
-        || request.parent_a.shape() != shape
-        || request.parent_b.shape() != shape
-        || request.parent_weight.shape() != shape
-    {
+    if request.back_direction.shape() != shape || request.parent_a.shape() != shape {
         return Err(PathTraceError::Value(
             "direction and parent arrays must match distance shape".to_string(),
         ));
@@ -118,7 +112,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
         let current_row = current / cols;
         let current_col = current % cols;
         if !request.distance[[current_row, current_col]].is_finite() {
-            return trace_parent_path(&request);
+            return Err(path_trace_error("entered a non-finite cell"));
         }
 
         let a = request.parent_a[[current_row, current_col]];
@@ -141,11 +135,11 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
 
         let degrees = request.back_direction[[current_row, current_col]];
         if !degrees.is_finite() {
-            return trace_parent_path(&request);
+            return Err(path_trace_error("encountered a non-finite direction"));
         }
         let (dr, dc) = direction_vector(degrees, request.cell_size_x, request.cell_size_y);
         if dr.abs() <= 1.0e-12 && dc.abs() <= 1.0e-12 {
-            return trace_parent_path(&request);
+            return Err(path_trace_error("encountered a zero direction"));
         }
 
         let previous_row = row;
@@ -159,7 +153,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
             || row > (rows - 1) as f64 + 1.0e-7
             || col > (cols - 1) as f64 + 1.0e-7
         {
-            return trace_parent_path(&request);
+            return Err(path_trace_error("stepped outside the raster"));
         }
         row = row.clamp(0.0, (rows - 1) as f64);
         col = col.clamp(0.0, (cols - 1) as f64);
@@ -179,7 +173,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
                 row = center_row;
                 col = center_col;
             } else {
-                return trace_parent_path(&request);
+                return Err(path_trace_error("crossed a non-finite cell"));
             }
         }
 
@@ -204,74 +198,8 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
     Ok(coords)
 }
 
-fn trace_parent_path(request: &TraceRequest<'_>) -> Result<Vec<f64>, PathTraceError> {
-    let shape = request.distance.shape();
-    let rows = shape[0];
-    let cols = shape[1];
-    let mut idx = request.start_row as usize * cols + request.start_col as usize;
-    let step_limit = if request.max_steps == 0 {
-        rows.saturating_mul(cols).saturating_mul(4).max(1)
-    } else {
-        request.max_steps
-    };
-    let mut coords = Vec::with_capacity(step_limit.min(1024) * 2);
-    let mut guard = 0usize;
-
-    loop {
-        let row = idx / cols;
-        let col = idx % cols;
-        push_coord(
-            &mut coords,
-            row as f64,
-            col as f64,
-            request.cell_size_x,
-            request.cell_size_y,
-            request.origin_x,
-            request.origin_y,
-        );
-
-        let a = request.parent_a[[row, col]];
-        if a < 0 {
-            break;
-        }
-        let b = request.parent_b[[row, col]];
-        let weight = request.parent_weight[[row, col]];
-        if b < 0 {
-            idx = a as usize;
-        } else {
-            let a_idx = a as usize;
-            let b_idx = b as usize;
-            let a_row = a_idx / cols;
-            let a_col = a_idx % cols;
-            let b_row = b_idx / cols;
-            let b_col = b_idx % cols;
-            let weight_b = 1.0 - weight;
-            let interp_row = weight * a_row as f64 + weight_b * b_row as f64;
-            let interp_col = weight * a_col as f64 + weight_b * b_col as f64;
-            push_coord(
-                &mut coords,
-                interp_row,
-                interp_col,
-                request.cell_size_x,
-                request.cell_size_y,
-                request.origin_x,
-                request.origin_y,
-            );
-
-            let a_dist = request.distance[[a_row, a_col]];
-            let b_dist = request.distance[[b_row, b_col]];
-            idx = if a_dist <= b_dist { a_idx } else { b_idx };
-        }
-
-        guard += 1;
-        if guard >= step_limit {
-            return Err(PathTraceError::Runtime(
-                "path tracing exceeded max_steps before reaching a source".to_string(),
-            ));
-        }
-    }
-
-    Ok(coords)
+fn path_trace_error(reason: &str) -> PathTraceError {
+    PathTraceError::Runtime(format!("path tracing {reason}"))
 }
 
 fn direction_vector(degrees: f64, cell_size_x: f64, cell_size_y: f64) -> (f64, f64) {
