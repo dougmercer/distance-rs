@@ -159,7 +159,6 @@ from distance_rs import (
     GeoBarriers,
     GeoPoints,
     GridSpec,
-    SolverOptions,
     load_surface,
     route_path,
 )
@@ -184,7 +183,7 @@ route = route_path(
     barriers=GeoBarriers("barriers.geojson"),
     elevation="elevation.tif",
     grid=GridSpec(margin=250.0),
-    solver=SolverOptions(vertical_factor="bidir_hiking_time"),
+    vertical_factor="bidir_hiking_time",
     baseline_speed=5.0,
 )
 
@@ -223,7 +222,6 @@ import numpy as np
 from distance_rs import (
     RasterGrid,
     RasterSurface,
-    SolverOptions,
     distance_accumulation,
     optimal_path_as_line,
 )
@@ -243,7 +241,7 @@ surface = RasterSurface(
 result = distance_accumulation(
     surface,
     source=(50, 50),
-    options=SolverOptions(vertical_factor={"type": "bidir_hiking_time"}),
+    vertical_factor={"type": "bidir_hiking_time"},
 )
 
 line = optimal_path_as_line(result, destination=(90, 90))

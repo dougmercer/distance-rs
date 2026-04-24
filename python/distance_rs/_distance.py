@@ -298,14 +298,6 @@ class RasterSurface:
     barriers: npt.ArrayLike | None = None
 
 
-@dataclass(frozen=True)
-class SolverOptions:
-    """Numerical options for distance accumulation."""
-
-    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None
-    use_surface_distance: bool = True
-
-
 @dataclass
 class DistanceAccumulationResult:
     distance: npt.NDArray[np.float64]
@@ -328,7 +320,7 @@ def distance_accumulation(
     surface: RasterSurface | npt.ArrayLike,
     source: Cell | Sequence[Cell] | npt.ArrayLike,
     *,
-    options: SolverOptions | None = None,
+    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
 ) -> DistanceAccumulationResult:
     """Compute accumulated cost distance from one or more source cells.
 
@@ -340,10 +332,6 @@ def distance_accumulation(
 
     if not isinstance(surface, RasterSurface):
         surface = RasterSurface(surface)
-    if options is None:
-        options = SolverOptions()
-    if not isinstance(options, SolverOptions):
-        raise TypeError("options must be a SolverOptions instance")
 
     cost_arr = np.ascontiguousarray(np.asarray(surface.cost, dtype=np.float64))
     if cost_arr.ndim != 2:
@@ -355,7 +343,7 @@ def distance_accumulation(
     source_cells = _normalize_source_cells(source, cost_arr.shape)
 
     cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
-    vf = VerticalFactor.from_any(options.vertical_factor)
+    vf = VerticalFactor.from_any(vertical_factor)
     origin_x, origin_y = _normalize_origin(surface.grid.origin)
 
     raw = _native.distance_accumulation(
@@ -363,7 +351,6 @@ def distance_accumulation(
         cost_arr,
         elevation_arr,
         barrier_arr,
-        options.use_surface_distance,
         vf.as_native(),
         cell_size_x,
         cell_size_y,

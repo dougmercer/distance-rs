@@ -44,7 +44,6 @@ def raster_dijkstra_baseline(
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
     barriers: npt.ArrayLike | None = None,
     cell_size: float | tuple[float, float] = 1.0,
-    use_surface_distance: bool = True,
 ) -> npt.NDArray[np.float64]:
     """Compute distance with a conventional 8-neighbor raster Dijkstra stencil."""
 
@@ -55,7 +54,6 @@ def raster_dijkstra_baseline(
         vertical_factor=vertical_factor,
         barriers=barriers,
         cell_size=cell_size,
-        use_surface_distance=use_surface_distance,
     ).distance
 
 
@@ -67,7 +65,6 @@ def raster_dijkstra(
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
     barriers: npt.ArrayLike | None = None,
     cell_size: float | tuple[float, float] = 1.0,
-    use_surface_distance: bool = True,
 ) -> RasterDijkstraResult:
     """Compute distance and parent links with an 8-neighbor raster Dijkstra stencil."""
 
@@ -141,7 +138,6 @@ def raster_dijkstra(
                 cost=cost,
                 elevation=elev,
                 has_elevation=has_elevation,
-                use_surface_distance=use_surface_distance,
                 vertical_factor=vf,
                 cell_size_x=cell_size_x,
                 cell_size_y=cell_size_y,
@@ -194,16 +190,13 @@ def transition_cost(
     cost: npt.NDArray[np.float64],
     elevation: npt.NDArray[np.float64],
     has_elevation: bool,
-    use_surface_distance: bool,
     vertical_factor: VerticalFactor,
     cell_size_x: float,
     cell_size_y: float,
 ) -> float:
     plan_distance = math.hypot((next_col - col) * cell_size_x, (next_row - row) * cell_size_y)
     dz = float(elevation[next_row, next_col] - elevation[row, col]) if has_elevation else 0.0
-    surface_distance = (
-        math.hypot(plan_distance, dz) if has_elevation and use_surface_distance else plan_distance
-    )
+    surface_distance = math.hypot(plan_distance, dz) if has_elevation else plan_distance
     angle = math.degrees(math.atan2(dz, plan_distance)) if has_elevation else 0.0
     vf = vertical_factor.factor(angle)
     if not math.isfinite(vf):

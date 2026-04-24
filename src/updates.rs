@@ -501,7 +501,7 @@ impl Solver {
     }
 
     fn surface_distance(&self, plan_distance: f64, dz: f64) -> f64 {
-        if self.has_elevation && self.use_surface_distance {
+        if self.has_elevation {
             plan_distance.hypot(dz)
         } else {
             plan_distance

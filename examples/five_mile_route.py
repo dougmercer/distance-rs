@@ -24,7 +24,6 @@ import numpy.typing as npt
 from distance_rs import (
     RasterGrid,
     RasterSurface,
-    SolverOptions,
     VerticalFactor,
     distance_accumulation,
 )
@@ -53,7 +52,6 @@ class CaseData:
     barriers: npt.NDArray[np.bool_]
     vertical_factor: VerticalFactor
     cell_size: float | tuple[float, float] = 1.0
-    use_surface_distance: bool = True
     exact_reference: npt.NDArray[np.float64] | None = None
 
 
@@ -276,7 +274,6 @@ def make_five_mile_case(
         barriers=barriers,
         vertical_factor=VerticalFactor.from_any(None),
         cell_size=cell_size,
-        use_surface_distance=False,
         exact_reference=None,
     )
     return case, (destination_row, destination_col)
@@ -296,10 +293,7 @@ def run_ordered_upwind(
             barriers=case.barriers,
         ),
         source=source_cells(case.sources),
-        options=SolverOptions(
-            vertical_factor=case.vertical_factor,
-            use_surface_distance=False,
-        ),
+        vertical_factor=case.vertical_factor,
     )
     elapsed = time.perf_counter() - start
     destination_cost = float(result.distance[destination])
@@ -327,7 +321,6 @@ def run_raster_dijkstra(case: CaseData, destination: tuple[int, int]) -> RouteRe
         barriers=case.barriers,
         vertical_factor=case.vertical_factor,
         cell_size=case.cell_size,
-        use_surface_distance=case.use_surface_distance,
     )
     elapsed = time.perf_counter() - start
     distance = result.distance

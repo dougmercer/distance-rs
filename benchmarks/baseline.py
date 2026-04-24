@@ -27,7 +27,6 @@ import numpy.typing as npt
 from distance_rs import (
     RasterGrid,
     RasterSurface,
-    SolverOptions,
     VerticalFactor,
     distance_accumulation,
 )
@@ -57,7 +56,6 @@ class CaseData:
     barriers: npt.NDArray[np.bool_]
     vertical_factor: VerticalFactor
     cell_size: float | tuple[float, float] = 1.0
-    use_surface_distance: bool = True
     exact_reference: npt.NDArray[np.float64] | None = None
 
 
@@ -103,10 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                             barriers=case.barriers,
                         ),
                         source=source_cells(case.sources),
-                        options=SolverOptions(
-                            vertical_factor=case.vertical_factor,
-                            use_surface_distance=case.use_surface_distance,
-                        ),
+                        vertical_factor=case.vertical_factor,
                     ).distance
                 ),
                 repeats=args.repeats,
@@ -123,7 +118,6 @@ def main(argv: list[str] | None = None) -> int:
                         barriers=case.barriers,
                         vertical_factor=case.vertical_factor,
                         cell_size=case.cell_size,
-                        use_surface_distance=case.use_surface_distance,
                     ),
                     repeats=args.repeats,
                     warmups=args.warmups,
@@ -354,7 +348,7 @@ def make_baseline_payload(
 def whitebox_comparable(case: CaseData) -> tuple[bool, str | None]:
     if case.vertical_factor.normalized().type != "none":
         return False, "Whitebox CostDistance has no vertical-factor input."
-    if case.elevation is not None and case.use_surface_distance:
+    if case.elevation is not None:
         finite_elevation = case.elevation[np.isfinite(case.elevation)]
         if finite_elevation.size and float(np.max(np.abs(finite_elevation))) > 1.0e-12:
             return False, "Whitebox CostDistance does not apply 3D surface-distance elevation."

@@ -29,7 +29,6 @@ from distance_rs import (
     GridSpec,
     OptimalPathResult,
     PathMetrics,
-    SolverOptions,
     load_surface,
     route_path,
 )
@@ -127,9 +126,7 @@ def main(argv: list[str] | None = None) -> None:
         barriers=[GeoBarriers(barrier, crs=CRS) for barrier in barriers],
         elevation=elevation_path,
         grid=GridSpec(crs=CRS, margin=args.crop_buffer),
-        solver=SolverOptions(
-            vertical_factor=VERTICAL_FACTOR,
-        ),
+        vertical_factor=VERTICAL_FACTOR,
         baseline_speed=args.baseline_speed,
     )
     dijkstra_route = run_raster_dijkstra_route(

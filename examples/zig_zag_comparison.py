@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from distance_rs import SolverOptions, distance_accumulation, optimal_path_as_line
+from distance_rs import distance_accumulation, optimal_path_as_line
 from distance_rs.baselines import raster_dijkstra, trace_raster_path
 
 
@@ -81,12 +81,10 @@ def main() -> int:
     ordered = distance_accumulation(
         cost,
         source=source,
-        options=SolverOptions(use_surface_distance=False),
     )
     dijkstra = raster_dijkstra(
         sources,
         cost_surface=cost,
-        use_surface_distance=False,
     )
 
     routes = []

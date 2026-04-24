@@ -82,7 +82,6 @@ pub(crate) struct Solver {
     pub(crate) barriers: BarrierMask,
     pub(crate) has_elevation: bool,
     pub(crate) flat_cost_mode: bool,
-    pub(crate) use_surface_distance: bool,
     pub(crate) vf: VerticalFactor,
     pub(crate) distance: Vec<f64>,
     pub(crate) parent: Vec<Parent>,
@@ -97,11 +96,7 @@ pub(crate) struct SolverInput {
     pub(crate) elevation: Vec<f64>,
     pub(crate) valid: Vec<bool>,
     pub(crate) has_blocked_cells: bool,
-}
-
-pub(crate) struct SolverOptions {
     pub(crate) has_elevation: bool,
-    pub(crate) use_surface_distance: bool,
     pub(crate) vf: VerticalFactor,
     pub(crate) cell_size_x: f64,
     pub(crate) cell_size_y: f64,
@@ -117,13 +112,8 @@ pub(crate) struct SolveOutput {
 }
 
 impl Solver {
-    pub(crate) fn new(input: SolverInput, options: SolverOptions) -> Self {
-        let grid = Grid::new(
-            input.rows,
-            input.cols,
-            options.cell_size_x,
-            options.cell_size_y,
-        );
+    pub(crate) fn new(input: SolverInput) -> Self {
+        let grid = Grid::new(input.rows, input.cols, input.cell_size_x, input.cell_size_y);
         let n = input.rows * input.cols;
         let barriers =
             BarrierMask::new(input.rows, input.cols, input.valid, input.has_blocked_cells);
@@ -132,10 +122,9 @@ impl Solver {
             cost: input.cost,
             elevation: input.elevation,
             barriers,
-            has_elevation: options.has_elevation,
-            flat_cost_mode: !options.has_elevation && options.vf.kind == VerticalFactorKind::None,
-            use_surface_distance: options.use_surface_distance,
-            vf: options.vf,
+            has_elevation: input.has_elevation,
+            flat_cost_mode: !input.has_elevation && input.vf.kind == VerticalFactorKind::None,
+            vf: input.vf,
             distance: vec![f64::INFINITY; n],
             parent: vec![Parent::none(); n],
             state: vec![FAR; n],

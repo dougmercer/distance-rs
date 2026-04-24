@@ -6,7 +6,7 @@ use pyo3::types::PyDict;
 
 use crate::grid::MIN_COST;
 use crate::path::{trace_optimal_path, PathTraceError, TraceRequest};
-use crate::solver::{Solver, SolverInput, SolverOptions};
+use crate::solver::{Solver, SolverInput};
 use crate::vertical::VerticalFactor;
 
 #[pyfunction]
@@ -17,7 +17,6 @@ fn distance_accumulation<'py>(
     cost_surface: PyReadonlyArray2<'py, f64>,
     elevation: Option<PyReadonlyArray2<'py, f64>>,
     barriers: Option<PyReadonlyArray2<'py, bool>>,
-    use_surface_distance: bool,
     vertical_factor: &Bound<'py, PyDict>,
     cell_size_x: f64,
     cell_size_y: f64,
@@ -116,23 +115,18 @@ fn distance_accumulation<'py>(
         sources_flat.push(row as usize * cols + col as usize);
     }
 
-    let solver = Solver::new(
-        SolverInput {
-            rows,
-            cols,
-            cost,
-            elevation: elev,
-            valid,
-            has_blocked_cells,
-        },
-        SolverOptions {
-            has_elevation,
-            use_surface_distance,
-            vf,
-            cell_size_x,
-            cell_size_y,
-        },
-    );
+    let solver = Solver::new(SolverInput {
+        rows,
+        cols,
+        cost,
+        elevation: elev,
+        valid,
+        has_blocked_cells,
+        has_elevation,
+        vf,
+        cell_size_x,
+        cell_size_y,
+    });
     let output = solver.solve(&sources_flat)?;
 
     let back_direction = output.back_direction();

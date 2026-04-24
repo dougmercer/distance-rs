@@ -126,7 +126,7 @@ def test_load_points_reprojects_gpkg_waypoints(tmp_path: Path) -> None:
     assert math.isclose(points[1][1], 5.0, abs_tol=1.0e-8)
 
 
-def test_route_path_crops_to_margin_and_forwards_solver_options(tmp_path: Path) -> None:
+def test_route_path_crops_to_margin(tmp_path: Path) -> None:
     land_use_path = tmp_path / "large_land_use.tif"
     transform = from_origin(0.0, 1000.0, 10.0, 10.0)
     land_use = np.ones((100, 100), dtype=np.float32)

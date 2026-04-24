@@ -10,7 +10,6 @@ import pytest
 from distance_rs import (
     RasterGrid,
     RasterSurface,
-    SolverOptions,
     VerticalFactor,
     distance_accumulation,
     optimal_path_as_line,
@@ -69,13 +68,22 @@ def test_binary_vertical_factor_blocks_upslope() -> None:
     result = distance_accumulation(
         surface,
         source=(4, 4),
-        options=SolverOptions(
-            vertical_factor=VerticalFactor("binary", low_cut_angle=-90.0, high_cut_angle=0.1),
-        ),
+        vertical_factor=VerticalFactor("binary", low_cut_angle=-90.0, high_cut_angle=0.1),
     )
 
     assert np.isfinite(result.distance[4, 3])
     assert math.isinf(result.distance[4, 8])
+
+
+def test_elevation_uses_surface_distance() -> None:
+    cost = np.ones((3, 3), dtype=float)
+    elevation = np.zeros((3, 3), dtype=float)
+    elevation[1, 2] = 3.0
+    surface = RasterSurface(cost, elevation=elevation)
+
+    result = distance_accumulation(surface, source=(1, 1))
+
+    assert result.distance[1, 2] == np.float64(math.hypot(1.0, 3.0))
 
 
 def test_distance_accumulation_rejects_non_finite_numeric_options() -> None:
@@ -93,7 +101,7 @@ def test_distance_accumulation_rejects_non_finite_numeric_options() -> None:
         distance_accumulation(
             cost,
             source=(1, 1),
-            options=SolverOptions(vertical_factor={"type": "linear", "slope": math.nan}),
+            vertical_factor={"type": "linear", "slope": math.nan},
         )
 
 
@@ -117,7 +125,6 @@ def test_optimal_path_as_line_traces_back_direction_without_zig_zag() -> None:
     result = distance_accumulation(
         np.ones((121, 151), dtype=float),
         source=source,
-        options=SolverOptions(use_surface_distance=False),
     )
 
     line = optimal_path_as_line(result, destination)
@@ -135,7 +142,6 @@ def test_optimal_path_as_line_repairs_invalid_direction_step_locally() -> None:
     result = distance_accumulation(
         RasterSurface(cost, barriers=barriers),
         source=source,
-        options=SolverOptions(use_surface_distance=False),
     )
 
     line = optimal_path_as_line(result, destination)
@@ -152,8 +158,8 @@ def test_raster_dijkstra_baseline_returns_distance_and_traceable_parent() -> Non
     barriers[:, 4] = True
     barriers[4, 4] = False
 
-    result = raster_dijkstra(sources, barriers=barriers, use_surface_distance=False)
-    distance_only = raster_dijkstra_baseline(sources, barriers=barriers, use_surface_distance=False)
+    result = raster_dijkstra(sources, barriers=barriers)
+    distance_only = raster_dijkstra_baseline(sources, barriers=barriers)
     line = trace_raster_path(result.parent, (4, 7))
 
     assert np.array_equal(result.distance, distance_only)

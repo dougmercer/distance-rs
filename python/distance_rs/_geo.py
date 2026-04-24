@@ -27,7 +27,6 @@ from shapely.geometry.base import BaseGeometry
 from ._distance import (
     RasterGrid,
     RasterSurface,
-    SolverOptions,
     VerticalFactor,
     distance_accumulation,
     optimal_path_as_line,
@@ -274,7 +273,7 @@ def route_path(
     elevation: ElevationRaster | str | Path | None = None,
     barriers: Any | None = None,
     grid: GridSpec | None = None,
-    solver: SolverOptions | None = None,
+    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
     baseline_speed: float = 5.0,
     compute_metrics: bool = True,
 ) -> OptimalPathResult:
@@ -286,7 +285,6 @@ def route_path(
 
     cost_spec = _cost_spec(cost)
     grid_spec = grid or GridSpec()
-    solver_options = solver or SolverOptions()
     with rasterio.open(cost_spec.path) as cost_src:
         target = _target_crs(cost_src, grid_spec.crs, name="cost raster")
 
@@ -297,7 +295,7 @@ def route_path(
     if len(waypoint_xy) < 2:
         raise ValueError("at least two waypoints are required")
 
-    vf = VerticalFactor.from_any(solver_options.vertical_factor)
+    vf = VerticalFactor.from_any(vertical_factor)
     legs: list[OptimalPathLeg] = []
     path_parts: list[npt.NDArray[np.float64]] = []
     total_metrics: PathMetrics | None = None
@@ -315,7 +313,7 @@ def route_path(
         _validate_endpoint(geo, source_cell, "source")
         _validate_endpoint(geo, destination_cell, "destination")
 
-        accumulation = distance_accumulation(geo.surface, source_cell, options=solver_options)
+        accumulation = distance_accumulation(geo.surface, source_cell, vertical_factor=vf)
         path_cell_xy = optimal_path_as_line(accumulation, destination_cell)
         if isinstance(path_cell_xy, list):
             raise RuntimeError("single destination unexpectedly produced multiple paths")

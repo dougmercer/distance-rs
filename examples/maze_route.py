@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from distance_rs import RasterSurface, SolverOptions, distance_accumulation, optimal_path_as_line
+from distance_rs import RasterSurface, distance_accumulation, optimal_path_as_line
 from distance_rs.baselines import compare_distances, raster_dijkstra, trace_raster_path
 
 
@@ -31,14 +31,12 @@ def main() -> int:
     ordered = distance_accumulation(
         RasterSurface(cost, barriers=barriers),
         source=source,
-        options=SolverOptions(use_surface_distance=False),
     )
     ordered_line = optimal_path_as_line(ordered, destination)
     dijkstra = raster_dijkstra(
         sources,
         cost_surface=cost,
         barriers=barriers,
-        use_surface_distance=False,
     )
     dijkstra_line = trace_raster_path(dijkstra.parent, destination)
     comparison = compare_distances(ordered.distance, dijkstra.distance)
