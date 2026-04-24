@@ -12,7 +12,7 @@ from typing import Any
 import fiona
 import numpy as np
 import numpy.typing as npt
-import rasterio
+import rasterio as rio
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
 from rasterio.transform import from_origin, rowcol, xy
@@ -37,19 +37,32 @@ Bounds = tuple[float, float, float, float]
 Cell = tuple[int, int]
 XY = tuple[float, float]
 
+__all__ = [
+    "CostRaster",
+    "GeoBarriers",
+    "GeoGrid",
+    "GeoPoints",
+    "GeoSurface",
+    "GridSpec",
+    "OptimalPathLeg",
+    "OptimalPathResult",
+    "PathMetrics",
+    "load_points",
+    "load_surface",
+    "route_path",
+]
+
 
 @dataclass(frozen=True)
 class GridSpec:
     """Target grid controls for GIS reads.
 
-    `bounds`, when supplied, are in the target CRS. `margin` is used by
-    `route_path` to crop each leg to the start/end bounding box plus margin.
+    `bounds`, when supplied, are in the target CRS.
     """
 
     crs: Any | None = None
     resolution: float | tuple[float, float] | None = None
     bounds: Bounds | None = None
-    margin: float | None = None
 
 
 @dataclass(frozen=True)
@@ -67,12 +80,6 @@ class CostRaster:
     blocked_values: set[float | int] | Sequence[float | int] | None = None
     resampling: str | Any = "nearest"
     nodata_is_barrier: bool = True
-
-
-@dataclass(frozen=True)
-class ElevationRaster:
-    path: str | Path
-    resampling: str | Any = "bilinear"
 
 
 @dataclass(frozen=True)
@@ -180,29 +187,29 @@ class OptimalPathResult:
 def load_points(points: Any, *, target_crs: Any) -> tuple[XY, ...]:
     """Load waypoint coordinates and reproject them to `target_crs`."""
 
-    target = rasterio.crs.CRS.from_user_input(target_crs)
+    target = rio.crs.CRS.from_user_input(target_crs)
     return tuple(_load_point_xy(points, target_crs=target))
 
 
 def load_surface(
     cost: CostRaster | str | Path,
     *,
-    elevation: ElevationRaster | str | Path | None = None,
+    elevation: str | Path | None = None,
+    elevation_resampling: str | Any = "bilinear",
     barriers: Any | None = None,
     grid: GridSpec | None = None,
 ) -> GeoSurface:
     """Read cost/elevation/barriers onto one target grid."""
 
     cost_spec = _cost_spec(cost)
-    elevation_spec = _elevation_spec(elevation)
     grid_spec = grid or GridSpec()
 
-    with rasterio.open(cost_spec.path) as cost_src:
+    with rio.open(cost_spec.path) as cost_src:
         target = _target_crs(cost_src, grid_spec.crs, name="cost raster")
         cell_size = _target_resolution(cost_src, grid_spec.resolution)
         base_bounds = _target_bounds(
             cost_src,
-            elevation_path=elevation_spec.path if elevation_spec else None,
+            elevation_path=Path(elevation) if elevation is not None else None,
             target_crs=target,
         )
         target_bounds = (
@@ -221,15 +228,15 @@ def load_surface(
         )
 
     elevation_arr = None
-    if elevation_spec is not None:
-        with rasterio.open(elevation_spec.path) as elevation_src:
+    if elevation is not None:
+        with rio.open(elevation) as elevation_src:
             elevation_arr = _read_to_grid(
                 elevation_src,
                 transform=transform,
                 crs=target,
                 width=width,
                 height=height,
-                resampling=elevation_spec.resampling,
+                resampling=elevation_resampling,
             )
 
     cost_arr, barrier_mask = _cost_and_barriers(
@@ -270,9 +277,11 @@ def route_path(
     cost: CostRaster | str | Path,
     waypoints: Any,
     *,
-    elevation: ElevationRaster | str | Path | None = None,
+    elevation: str | Path | None = None,
+    elevation_resampling: str | Any = "bilinear",
     barriers: Any | None = None,
     grid: GridSpec | None = None,
+    margin: float | None = None,
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
     baseline_speed: float = 5.0,
     compute_metrics: bool = True,
@@ -285,7 +294,7 @@ def route_path(
 
     cost_spec = _cost_spec(cost)
     grid_spec = grid or GridSpec()
-    with rasterio.open(cost_spec.path) as cost_src:
+    with rio.open(cost_spec.path) as cost_src:
         target = _target_crs(cost_src, grid_spec.crs, name="cost raster")
 
     if getattr(target, "is_geographic", False):
@@ -301,10 +310,11 @@ def route_path(
     total_metrics: PathMetrics | None = None
 
     for index, (start_xy, end_xy) in enumerate(zip(waypoint_xy, waypoint_xy[1:])):
-        leg_grid = _leg_grid_spec(grid_spec, target, start_xy, end_xy)
+        leg_grid = _leg_grid_spec(grid_spec, target, start_xy, end_xy, margin=margin)
         geo = load_surface(
             cost_spec,
             elevation=elevation,
+            elevation_resampling=elevation_resampling,
             barriers=barriers,
             grid=leg_grid,
         )
@@ -364,21 +374,22 @@ def _cost_spec(cost: CostRaster | str | Path) -> CostRaster:
     return cost if isinstance(cost, CostRaster) else CostRaster(cost)
 
 
-def _elevation_spec(elevation: ElevationRaster | str | Path | None) -> ElevationRaster | None:
-    if elevation is None:
-        return None
-    return elevation if isinstance(elevation, ElevationRaster) else ElevationRaster(elevation)
-
-
 def _target_crs(dataset: Any, crs: Any | None, *, name: str) -> Any:
     target_input = crs or dataset.crs
     if target_input is None:
         raise ValueError(f"{name} has no CRS; pass GridSpec(crs=...)")
-    return rasterio.crs.CRS.from_user_input(target_input)
+    return rio.crs.CRS.from_user_input(target_input)
 
 
-def _leg_grid_spec(grid: GridSpec, target_crs: Any, start_xy: XY, end_xy: XY) -> GridSpec:
-    margin = _normalize_optional_radius(grid.margin, "margin")
+def _leg_grid_spec(
+    grid: GridSpec,
+    target_crs: Any,
+    start_xy: XY,
+    end_xy: XY,
+    *,
+    margin: float | None,
+) -> GridSpec:
+    margin = _normalize_optional_radius(margin, "margin")
     bounds = grid.bounds
     if margin is not None:
         bounds = (
@@ -536,7 +547,7 @@ def _target_bounds(
     if elevation_path is None:
         return cost_bounds
 
-    with rasterio.open(elevation_path) as elevation_src:
+    with rio.open(elevation_path) as elevation_src:
         elevation_bounds = _dataset_bounds_in_crs(elevation_src, target_crs)
     return _intersect_bounds(cost_bounds, elevation_bounds)
 
@@ -625,7 +636,7 @@ def _read_to_grid(
 ) -> npt.NDArray[np.float64]:
     destination = np.full((height, width), np.nan, dtype=np.float64)
     reproject(
-        source=rasterio.band(dataset, 1),
+        source=rio.band(dataset, 1),
         destination=destination,
         src_transform=dataset.transform,
         src_crs=dataset.crs,
@@ -730,7 +741,7 @@ def _read_barrier_raster(
     shape: tuple[int, int],
 ) -> npt.NDArray[np.bool_]:
     height, width = shape
-    with rasterio.open(path) as dataset:
+    with rio.open(path) as dataset:
         values = _read_to_grid(
             dataset,
             transform=transform,
@@ -805,7 +816,7 @@ def _load_geometries(
     if not geometries:
         return []
 
-    resolved_source_crs = rasterio.crs.CRS.from_user_input(geometry_crs)
+    resolved_source_crs = rio.crs.CRS.from_user_input(geometry_crs)
     if resolved_source_crs == target_crs:
         return geometries
     return [
@@ -845,7 +856,7 @@ def _load_point_xy(points: Any, *, target_crs: Any) -> list[XY]:
         return []
     if geometry_crs is None:
         raise ValueError("waypoint input has no CRS; pass GeoPoints(..., crs=...)")
-    source_crs = rasterio.crs.CRS.from_user_input(geometry_crs)
+    source_crs = rio.crs.CRS.from_user_input(geometry_crs)
     if source_crs == target_crs:
         return [(float(x_coord), float(y_coord)) for x_coord, y_coord in coords]
 

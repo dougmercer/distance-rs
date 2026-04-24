@@ -135,7 +135,7 @@ def test_route_path_crops_to_margin(tmp_path: Path) -> None:
     route = route_path(
         land_use_path,
         GeoPoints(LineString([(105.0, 895.0), (305.0, 795.0)]), crs="EPSG:3857"),
-        grid=GridSpec(margin=25.0),
+        margin=25.0,
     )
 
     leg = route.legs[0]
@@ -163,7 +163,7 @@ def test_load_surface_rejects_invalid_grid_options(tmp_path: Path) -> None:
         route_path(
             land_use_path,
             GeoPoints([(5.0, 35.0), (35.0, 5.0)], crs="EPSG:3857"),
-            grid=GridSpec(margin=math.nan),
+            margin=math.nan,
         )
 
 
@@ -218,7 +218,7 @@ def test_route_path_stitches_waypoint_legs_and_metrics(tmp_path: Path) -> None:
     route = route_path(
         cost_path,
         GeoPoints([(5.0, 295.0), (145.0, 155.0), (245.0, 55.0)], crs="EPSG:3857"),
-        grid=GridSpec(margin=40.0),
+        margin=40.0,
         baseline_speed=5.0,
     )
 

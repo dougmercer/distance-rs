@@ -125,7 +125,8 @@ def main(argv: list[str] | None = None) -> None:
         GeoPoints(waypoints, crs=CRS),
         barriers=[GeoBarriers(barrier, crs=CRS) for barrier in barriers],
         elevation=elevation_path,
-        grid=GridSpec(crs=CRS, margin=args.crop_buffer),
+        grid=GridSpec(crs=CRS),
+        margin=args.crop_buffer,
         vertical_factor=VERTICAL_FACTOR,
         baseline_speed=args.baseline_speed,
     )

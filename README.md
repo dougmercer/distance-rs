@@ -182,7 +182,7 @@ route = route_path(
     ),
     barriers=GeoBarriers("barriers.geojson"),
     elevation="elevation.tif",
-    grid=GridSpec(margin=250.0),
+    margin=250.0,
     vertical_factor="bidir_hiking_time",
     baseline_speed=5.0,
 )
@@ -195,10 +195,10 @@ route.metrics
 Raster paths infer CRS, transform, resolution, and bounds from the file unless
 overridden by `GridSpec`. Vector files infer CRS from file metadata; GeoJSON
 defaults to `EPSG:4326`. Plain coordinate lists and Shapely geometries must be
-wrapped in `GeoPoints(..., crs=...)` or `GeoBarriers(..., crs=...)`. `margin`
-crops each route leg to the start/end bounding box plus that many map units,
-snapped to the cost raster grid. The native solver uses a local 3-by-3 Eikonal
-stencil for ArcGIS-style behavior.
+wrapped in `GeoPoints(..., crs=...)` or `GeoBarriers(..., crs=...)`. When
+`margin` is supplied, `route_path` crops each route leg to the start/end bounding
+box plus that many map units, snapped to the cost raster grid. The native solver
+uses a local 3-by-3 Eikonal stencil for ArcGIS-style behavior.
 
 To exercise the cropped GeoTIFF path on large local files, generate synthetic
 8000 x 8000 rasters at 1.5 meter resolution, route across a small corridor, and

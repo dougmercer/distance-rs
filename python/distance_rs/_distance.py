@@ -12,6 +12,15 @@ from . import _native
 
 Cell = tuple[int, int]
 
+__all__ = [
+    "DistanceAccumulationResult",
+    "RasterGrid",
+    "RasterSurface",
+    "VerticalFactor",
+    "distance_accumulation",
+    "optimal_path_as_line",
+]
+
 
 _VERTICAL_FACTOR_OPTION_NAMES = (
     "zero_factor",
@@ -301,8 +310,8 @@ class RasterSurface:
 @dataclass
 class DistanceAccumulationResult:
     distance: npt.NDArray[np.float64]
-    back_direction: npt.NDArray[np.float64]
-    parent_a: npt.NDArray[np.int64]
+    _back_direction: npt.NDArray[np.float64] = field(repr=False)
+    _parent_a: npt.NDArray[np.int64] = field(repr=False)
     cell_size: tuple[float, float]
     origin: tuple[float, float]
     vertical_factor: VerticalFactor
@@ -358,8 +367,8 @@ def distance_accumulation(
 
     return DistanceAccumulationResult(
         distance=raw["distance"],
-        back_direction=raw["back_direction"],
-        parent_a=raw["parent_a"],
+        _back_direction=raw["back_direction"],
+        _parent_a=raw["parent_a"],
         cell_size=(cell_size_x, cell_size_y),
         origin=(origin_x, origin_y),
         vertical_factor=vf,
@@ -437,8 +446,8 @@ def optimal_path_as_line(
         max_steps_value = _normalize_max_steps(max_steps)
         return _native.optimal_path_as_line(
             result.distance,
-            result.back_direction,
-            result.parent_a,
+            result._back_direction,
+            result._parent_a,
             int(row),
             int(col),
             result.cell_size[0],

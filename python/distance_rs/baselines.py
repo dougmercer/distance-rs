@@ -27,6 +27,23 @@ NEIGHBORS_8 = (
     (1, 1),
 )
 
+__all__ = [
+    "MIN_COST",
+    "RasterDijkstraResult",
+    "WHITEBOX_NODATA",
+    "compare_distances",
+    "euclidean_distance_to_sources",
+    "json_safe",
+    "normalize_cell_size",
+    "raster_dijkstra",
+    "raster_dijkstra_baseline",
+    "read_whitebox_header",
+    "read_whitebox_raster",
+    "trace_raster_path",
+    "whitebox_dtype",
+    "write_whitebox_raster",
+]
+
 
 @dataclass(frozen=True)
 class RasterDijkstraResult:

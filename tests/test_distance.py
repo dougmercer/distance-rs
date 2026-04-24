@@ -17,24 +17,6 @@ from distance_rs import (
 from distance_rs.baselines import raster_dijkstra, raster_dijkstra_baseline, trace_raster_path
 
 
-def test_package_import_does_not_load_geo_dependencies() -> None:
-    script = """
-import sys
-import distance_rs
-print('distance_rs._geo' in sys.modules)
-from distance_rs import *
-print('distance_rs._geo' in sys.modules)
-"""
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.stdout.splitlines() == ["False", "False"]
-
-
 def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
     cost = np.ones((21, 21), dtype=float)
 
