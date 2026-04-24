@@ -425,6 +425,7 @@ def optimal_path_as_line(
         max_steps_value = _normalize_max_steps(max_steps)
         return _native.optimal_path_as_line(
             result.distance,
+            result.back_direction,
             result.parent_a,
             result.parent_b,
             result.parent_weight,

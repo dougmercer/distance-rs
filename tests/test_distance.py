@@ -116,6 +116,20 @@ def test_optimal_path_as_line_reaches_source() -> None:
     assert np.linalg.norm(line[-1] - np.array([7.0, 7.0])) <= math.sqrt(2)
 
 
+def test_optimal_path_as_line_traces_back_direction_without_zig_zag() -> None:
+    source = (16, 55)
+    destination = (94, 100)
+    result = distance_accumulation(
+        np.ones((121, 151), dtype=float),
+        source=source,
+        options=SolverOptions(stencil_radius=23.0, use_surface_distance=False),
+    )
+
+    line = optimal_path_as_line(result, destination)
+
+    assert _path_area_from_straight_line(line, source, destination) < 50.0
+
+
 def test_raster_dijkstra_baseline_returns_distance_and_traceable_parent() -> None:
     sources = np.zeros((9, 9), dtype=bool)
     sources[4, 1] = True
@@ -132,3 +146,26 @@ def test_raster_dijkstra_baseline_returns_distance_and_traceable_parent() -> Non
     assert np.isfinite(result.distance[4, 7])
     assert np.allclose(line[0], [7.0, 4.0])
     assert np.allclose(line[-1], [1.0, 4.0])
+
+
+def _path_area_from_straight_line(
+    line: np.ndarray,
+    source: tuple[int, int],
+    destination: tuple[int, int],
+) -> float:
+    source_xy = np.asarray([source[1], source[0]], dtype=np.float64)
+    destination_xy = np.asarray([destination[1], destination[0]], dtype=np.float64)
+    axis = destination_xy - source_xy
+    length = np.linalg.norm(axis)
+    if length <= 1.0e-12 or len(line) < 2:
+        return 0.0
+
+    unit = axis / length
+    normal = np.asarray([-unit[1], unit[0]], dtype=np.float64)
+    centered = line - source_xy
+    progress = centered @ unit
+    cross_track = np.abs(centered @ normal)
+    order = np.argsort(progress)
+    progress = progress[order]
+    cross_track = cross_track[order]
+    return float(np.sum(0.5 * np.diff(progress) * (cross_track[:-1] + cross_track[1:])))

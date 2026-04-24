@@ -217,6 +217,7 @@ fn distance_accumulation<'py>(
 fn optimal_path_as_line<'py>(
     py: Python<'py>,
     distance: PyReadonlyArray2<'py, f64>,
+    back_direction: PyReadonlyArray2<'py, f64>,
     parent_a: PyReadonlyArray2<'py, i64>,
     parent_b: PyReadonlyArray2<'py, i64>,
     parent_weight: PyReadonlyArray2<'py, f64>,
@@ -230,6 +231,7 @@ fn optimal_path_as_line<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let coords = trace_optimal_path(TraceRequest {
         distance: distance.as_array(),
+        back_direction: back_direction.as_array(),
         parent_a: parent_a.as_array(),
         parent_b: parent_b.as_array(),
         parent_weight: parent_weight.as_array(),
