@@ -102,10 +102,14 @@ def make_case() -> tuple[
         sigma_col = rng.uniform(0.05, 0.18) * cols
         sigma_row = rng.uniform(0.05, 0.18) * rows
         sign = float(rng.choice([-1, 1]))
-        cost += sign * 5.0 * np.exp(
-            -(
-                (x - center_col) ** 2 / (2.0 * sigma_col * sigma_col)
-                + (y - center_row) ** 2 / (2.0 * sigma_row * sigma_row)
+        cost += (
+            sign
+            * 5.0
+            * np.exp(
+                -(
+                    (x - center_col) ** 2 / (2.0 * sigma_col * sigma_col)
+                    + (y - center_row) ** 2 / (2.0 * sigma_row * sigma_row)
+                )
             )
         )
 
