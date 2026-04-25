@@ -122,6 +122,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
     };
     let mut coords = Vec::with_capacity(step_limit.min(1024) * 2);
     let mut cursor = TraceCursor::new(request.start_row, request.start_col, rows, cols);
+    let mut segment_crossings = Vec::new();
     let mut guard = 0usize;
 
     push_world_coord(
@@ -164,6 +165,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
             parent_point,
             request.cell_size_x,
             request.cell_size_y,
+            &mut segment_crossings,
         )?;
         cursor.move_to(next);
 
@@ -239,21 +241,32 @@ fn next_clear_trace_step(
     parent_point: TracePoint,
     cell_size_x: f64,
     cell_size_y: f64,
+    segment_crossings: &mut Vec<f64>,
 ) -> Result<TracePoint, PathTraceError> {
     if degrees.is_finite() {
         if let Ok(proposed) = next_trace_step(cursor, degrees, cell_size_x, cell_size_y) {
-            if let Some(step) =
-                clear_continuable_step(request, cursor, proposed, cell_size_x, cell_size_y)?
-            {
+            if let Some(step) = clear_continuable_step(
+                request,
+                cursor,
+                proposed,
+                cell_size_x,
+                cell_size_y,
+                segment_crossings,
+            )? {
                 return Ok(step);
             }
         }
     }
 
     let parent_step = next_trace_step_toward(cursor, parent_point)?;
-    if let Some(step) =
-        clear_continuable_step(request, cursor, parent_step, cell_size_x, cell_size_y)?
-    {
+    if let Some(step) = clear_continuable_step(
+        request,
+        cursor,
+        parent_step,
+        cell_size_x,
+        cell_size_y,
+        segment_crossings,
+    )? {
         return Ok(step);
     }
 
@@ -266,17 +279,26 @@ fn clear_continuable_step(
     proposed: TracePoint,
     cell_size_x: f64,
     cell_size_y: f64,
+    segment_crossings: &mut Vec<f64>,
 ) -> Result<Option<TracePoint>, PathTraceError> {
-    if !trace_segment_clear(request, cursor.point, proposed) {
+    if !trace_segment_clear(request, cursor.point, proposed, segment_crossings) {
         return Ok(None);
     }
-    if trace_can_continue_from(request, proposed, cell_size_x, cell_size_y)? {
+    if trace_can_continue_from(
+        request,
+        proposed,
+        cell_size_x,
+        cell_size_y,
+        segment_crossings,
+    )? {
         return Ok(Some(proposed));
     }
 
     let (row, col) = cell_for_point(proposed, cursor.rows, cursor.cols)?;
     let center = TracePoint::at_cell_center(row, col);
-    if !proposed.is_near(center) && trace_segment_clear(request, cursor.point, center) {
+    if !proposed.is_near(center)
+        && trace_segment_clear(request, cursor.point, center, segment_crossings)
+    {
         return Ok(Some(center));
     }
     Ok(None)
@@ -287,6 +309,7 @@ fn trace_can_continue_from(
     point: TracePoint,
     cell_size_x: f64,
     cell_size_y: f64,
+    segment_crossings: &mut Vec<f64>,
 ) -> Result<bool, PathTraceError> {
     let shape = request.distance.shape();
     let (row, col) = cell_for_point(point, shape[0], shape[1])?;
@@ -305,7 +328,7 @@ fn trace_can_continue_from(
     let degrees = request.back_direction[[row, col]];
     if degrees.is_finite() {
         if let Ok(proposed) = next_trace_step(&cursor, degrees, cell_size_x, cell_size_y) {
-            if trace_segment_clear(request, point, proposed) {
+            if trace_segment_clear(request, point, proposed, segment_crossings) {
                 return Ok(true);
             }
         }
@@ -314,7 +337,12 @@ fn trace_can_continue_from(
     let Ok(parent_step) = next_trace_step_toward(&cursor, parent_point) else {
         return Ok(false);
     };
-    Ok(trace_segment_clear(request, point, parent_step))
+    Ok(trace_segment_clear(
+        request,
+        point,
+        parent_step,
+        segment_crossings,
+    ))
 }
 
 fn cell_for_point(
@@ -425,15 +453,21 @@ fn next_axis_crossing(value: f64, delta: f64) -> f64 {
     (target - value) / delta
 }
 
-fn trace_segment_clear(request: &TraceRequest<'_>, start: TracePoint, end: TracePoint) -> bool {
+fn trace_segment_clear(
+    request: &TraceRequest<'_>,
+    start: TracePoint,
+    end: TracePoint,
+    segment_crossings: &mut Vec<f64>,
+) -> bool {
     let shape = request.distance.shape();
-    grid_segment::segment_clear(
+    grid_segment::segment_clear_with_crossings(
         shape[0],
         shape[1],
         start.row,
         start.col,
         end.row,
         end.col,
+        segment_crossings,
         |row, col| request.valid[[row, col]],
     )
 }

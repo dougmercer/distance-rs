@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -88,6 +89,7 @@ pub(crate) struct Solver {
     pub(crate) back_direction: Vec<f64>,
     pub(crate) state: Vec<u8>,
     pub(crate) heap: BinaryHeap<HeapEntry>,
+    segment_clear_crossings: RefCell<Vec<f64>>,
 }
 
 pub(crate) struct SolverInput {
@@ -128,6 +130,7 @@ impl Solver {
             back_direction: vec![f64::NAN; n],
             state: vec![FAR; n],
             heap: BinaryHeap::new(),
+            segment_clear_crossings: RefCell::new(Vec::new()),
         }
     }
 
@@ -270,11 +273,19 @@ impl Solver {
     }
 
     pub(crate) fn segment_clear_index_to_index(&self, a: usize, b: usize) -> bool {
-        self.barriers.segment_clear_index_to_index(&self.grid, a, b)
+        let mut crossings = self.segment_clear_crossings.borrow_mut();
+        self.barriers
+            .segment_clear_index_to_index_with_crossings(&self.grid, a, b, &mut crossings)
     }
 
     pub(crate) fn segment_clear_coord_to_index(&self, row0: f64, col0: f64, idx: usize) -> bool {
-        self.barriers
-            .segment_clear_coord_to_index(&self.grid, row0, col0, idx)
+        let mut crossings = self.segment_clear_crossings.borrow_mut();
+        self.barriers.segment_clear_coord_to_index_with_crossings(
+            &self.grid,
+            row0,
+            col0,
+            idx,
+            &mut crossings,
+        )
     }
 }

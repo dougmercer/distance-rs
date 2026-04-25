@@ -39,20 +39,33 @@ impl BarrierMask {
         self.has_blocked_cells
     }
 
-    pub(crate) fn segment_clear_index_to_index(&self, grid: &Grid, a: usize, b: usize) -> bool {
+    pub(crate) fn segment_clear_index_to_index_with_crossings(
+        &self,
+        grid: &Grid,
+        a: usize,
+        b: usize,
+        crossings: &mut Vec<f64>,
+    ) -> bool {
         if !self.has_blocked_cells {
             return true;
         }
         let (a_row, a_col) = grid.row_col(a);
-        self.segment_clear_coord_to_index(grid, a_row as f64, a_col as f64, b)
+        self.segment_clear_coord_to_index_with_crossings(
+            grid,
+            a_row as f64,
+            a_col as f64,
+            b,
+            crossings,
+        )
     }
 
-    pub(crate) fn segment_clear_coord_to_index(
+    pub(crate) fn segment_clear_coord_to_index_with_crossings(
         &self,
         grid: &Grid,
         row0: f64,
         col0: f64,
         idx: usize,
+        crossings: &mut Vec<f64>,
     ) -> bool {
         if !self.has_blocked_cells {
             return true;
@@ -61,13 +74,35 @@ impl BarrierMask {
         if self.segment_bounds_clear(grid, row0, col0, row1, col1) {
             return true;
         }
-        self.segment_grid_clear(grid, row0, col0, row1 as f64, col1 as f64)
+        self.segment_grid_clear_with_crossings(
+            grid,
+            row0,
+            col0,
+            row1 as f64,
+            col1 as f64,
+            crossings,
+        )
     }
 
-    fn segment_grid_clear(&self, grid: &Grid, row0: f64, col0: f64, row1: f64, col1: f64) -> bool {
-        grid_segment::segment_clear(grid.rows, grid.cols, row0, col0, row1, col1, |row, col| {
-            self.valid[grid.idx(row, col)]
-        })
+    fn segment_grid_clear_with_crossings(
+        &self,
+        grid: &Grid,
+        row0: f64,
+        col0: f64,
+        row1: f64,
+        col1: f64,
+        crossings: &mut Vec<f64>,
+    ) -> bool {
+        grid_segment::segment_clear_with_crossings(
+            grid.rows,
+            grid.cols,
+            row0,
+            col0,
+            row1,
+            col1,
+            crossings,
+            |row, col| self.valid[grid.idx(row, col)],
+        )
     }
 
     fn segment_bounds_clear(

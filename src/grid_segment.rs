@@ -2,13 +2,15 @@ use std::cmp::Ordering;
 
 use crate::grid::{EPS, GRID_EPS};
 
-pub(crate) fn segment_clear<F>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn segment_clear_with_crossings<F>(
     rows: usize,
     cols: usize,
     row0: f64,
     col0: f64,
     row1: f64,
     col1: f64,
+    crossings: &mut Vec<f64>,
     mut cell_clear: F,
 ) -> bool
 where
@@ -24,10 +26,10 @@ where
     let y1 = row1 + 0.5;
     let dx = x1 - x0;
     let dy = y1 - y0;
-    let mut crossings = Vec::new();
+    crossings.clear();
 
-    push_axis_crossings(&mut crossings, x0, dx);
-    push_axis_crossings(&mut crossings, y0, dy);
+    push_axis_crossings(crossings, x0, dx);
+    push_axis_crossings(crossings, y0, dy);
     crossings.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     crossings.dedup_by(|a, b| (*a - *b).abs() <= GRID_EPS);
 
@@ -36,14 +38,14 @@ where
     {
         return false;
     }
-    for &t in &crossings {
+    for &t in crossings.iter() {
         if !segment_point_clear(rows, cols, x0 + dx * t, y0 + dy * t, &mut cell_clear) {
             return false;
         }
     }
 
     let mut previous = 0.0;
-    for next in crossings.into_iter().chain(std::iter::once(1.0)) {
+    for &next in crossings.iter().chain(std::iter::once(&1.0)) {
         if next - previous > GRID_EPS {
             let midpoint = 0.5 * (previous + next);
             if !segment_cell_clear(
