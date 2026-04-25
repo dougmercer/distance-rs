@@ -24,7 +24,6 @@ struct AcceptedNeighbor {
 struct BestCandidate {
     value: f64,
     parent: Parent,
-    back_direction: f64,
 }
 
 impl BestCandidate {
@@ -32,25 +31,24 @@ impl BestCandidate {
         Self {
             value: f64::INFINITY,
             parent: Parent::none(),
-            back_direction: f64::NAN,
         }
     }
 
-    fn consider(&mut self, value: f64, parent: Parent, back_direction: f64) {
+    fn consider(&mut self, value: f64, parent: Parent) {
         if value < self.value {
             self.value = value;
             self.parent = parent;
-            self.back_direction = back_direction;
         }
     }
 
-    fn into_update(self, idx: usize) -> Option<CandidateUpdate> {
+    fn into_update(self, solver: &Solver, idx: usize) -> Option<CandidateUpdate> {
         if self.value.is_finite() {
+            let back_direction = solver.back_direction_for_parent(idx, self.parent, self.value)?;
             Some(CandidateUpdate {
                 idx,
                 value: self.value,
                 parent: self.parent,
-                back_direction: self.back_direction,
+                back_direction,
             })
         } else {
             None
@@ -73,6 +71,7 @@ struct SegmentContext<'a> {
     elevation_idx: f64,
     elevation_a: f64,
     elevation_b: f64,
+    barrier_bounds_clear: bool,
 }
 
 impl<'a> SegmentContext<'a> {
@@ -80,6 +79,14 @@ impl<'a> SegmentContext<'a> {
         let (a_row, a_col) = solver.row_col(a);
         let (b_row, b_col) = solver.row_col(b);
         let (p_row, p_col) = solver.row_col(idx);
+        let row_min = a_row.min(b_row).min(p_row);
+        let row_max = a_row.max(b_row).max(p_row);
+        let col_min = a_col.min(b_col).min(p_col);
+        let col_max = a_col.max(b_col).max(p_col);
+        let barrier_bounds_clear =
+            solver
+                .barriers
+                .cell_bounds_clear(&solver.grid, row_min, row_max, col_min, col_max);
         let (elevation_idx, elevation_a, elevation_b) = if solver.has_elevation {
             (
                 solver.elevation[idx],
@@ -104,6 +111,7 @@ impl<'a> SegmentContext<'a> {
             elevation_idx,
             elevation_a,
             elevation_b,
+            barrier_bounds_clear,
         }
     }
 
@@ -111,7 +119,7 @@ impl<'a> SegmentContext<'a> {
         let weight_b = 1.0 - weight_a;
         let y_row = weight_a * self.a_row + weight_b * self.b_row;
         let y_col = weight_a * self.a_col + weight_b * self.b_col;
-        if self.solver.barriers.has_blocked_cells()
+        if !self.barrier_bounds_clear
             && !self
                 .solver
                 .segment_clear_coord_to_index(y_row, y_col, self.idx)
@@ -326,7 +334,7 @@ impl Solver {
             }
         }
 
-        best.into_update(idx)
+        best.into_update(self, idx)
     }
 
     fn compute_incremental_update(
@@ -378,7 +386,7 @@ impl Solver {
             consider_center(&mut best);
         }
 
-        best.into_update(idx)
+        best.into_update(self, idx)
     }
 
     fn accepted_neighbors(&self, idx: usize) -> ([AcceptedNeighbor; 9], usize) {
@@ -457,15 +465,13 @@ impl Solver {
         plan_distance: f64,
     ) {
         if let Some(value) = self.point_candidate(idx, q, plan_distance) {
-            if let Some(back_direction) = self.back_direction_to_index(idx, q) {
-                best.consider(value, Parent::point(q), back_direction);
-            }
+            best.consider(value, Parent::point(q));
         }
     }
 
     fn consider_segment_candidate(&self, best: &mut BestCandidate, idx: usize, a: usize, b: usize) {
-        if let Some((value, weight, back_direction)) = self.segment_candidate(idx, a, b) {
-            best.consider(value, Parent::segment(a, b, weight), back_direction);
+        if let Some((value, weight)) = self.segment_candidate(idx, a, b) {
+            best.consider(value, Parent::segment(a, b, weight));
         }
     }
 
@@ -492,9 +498,9 @@ impl Solver {
         Some(self.distance[q] + surface_distance * self.cost[idx] * vf)
     }
 
-    fn segment_candidate(&self, idx: usize, a: usize, b: usize) -> Option<(f64, f64, f64)> {
+    fn segment_candidate(&self, idx: usize, a: usize, b: usize) -> Option<(f64, f64)> {
         let context = SegmentContext::new(self, idx, a, b);
-        if !self.barriers.has_blocked_cells() {
+        if context.barrier_bounds_clear {
             if let Some(factor) = context.constant_surface_factor() {
                 return self.constant_factor_segment_candidate(idx, a, b, &context, factor);
             }
@@ -536,8 +542,7 @@ impl Solver {
             }
         }
 
-        let back_direction = self.segment_back_direction(&context, best_value, best_weight)?;
-        Some((best_value, best_weight, back_direction))
+        Some((best_value, best_weight))
     }
 
     fn constant_factor_segment_candidate(
@@ -547,7 +552,7 @@ impl Solver {
         b: usize,
         context: &SegmentContext<'_>,
         factor: f64,
-    ) -> Option<(f64, f64, f64)> {
+    ) -> Option<(f64, f64)> {
         let mut best_value = self.endpoint_segment_value(idx, b, context.b_row, context.b_col);
         let mut best_weight = 0.0;
 
@@ -568,8 +573,7 @@ impl Solver {
         }
 
         if best_value.is_finite() {
-            let back_direction = self.segment_back_direction(context, best_value, best_weight)?;
-            Some((best_value, best_weight, back_direction))
+            Some((best_value, best_weight))
         } else {
             None
         }
@@ -592,6 +596,20 @@ impl Solver {
         context
             .plane_back_direction(value)
             .or_else(|| context.parent_back_direction(weight))
+    }
+
+    fn back_direction_for_parent(&self, idx: usize, parent: Parent, value: f64) -> Option<f64> {
+        if parent.a < 0 {
+            return None;
+        }
+        let a = parent.a as usize;
+        if parent.b < 0 {
+            return self.back_direction_to_index(idx, a);
+        }
+
+        let b = parent.b as usize;
+        let context = SegmentContext::new(self, idx, a, b);
+        self.segment_back_direction(&context, value, parent.weight)
     }
 
     fn surface_distance(&self, plan_distance: f64, dz: f64) -> f64 {

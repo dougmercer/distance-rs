@@ -92,6 +92,7 @@ impl Grid {
     pub(crate) fn offset_within_radius(&self, dr: isize, dc: isize) -> bool {
         let dx = dc as f64 * self.cell_size_x;
         let dy = dr as f64 * self.cell_size_y;
-        dx * dx + dy * dy <= self.cell_size_x.hypot(self.cell_size_y).powi(2) + EPS
+        let radius_sq = self.cell_size_x * self.cell_size_x + self.cell_size_y * self.cell_size_y;
+        dx * dx + dy * dy <= radius_sq + EPS
     }
 }

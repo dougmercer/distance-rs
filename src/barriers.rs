@@ -35,8 +35,18 @@ impl BarrierMask {
         self.valid[idx]
     }
 
-    pub(crate) fn has_blocked_cells(&self) -> bool {
-        self.has_blocked_cells
+    pub(crate) fn cell_bounds_clear(
+        &self,
+        grid: &Grid,
+        row_min: usize,
+        row_max: usize,
+        col_min: usize,
+        col_max: usize,
+    ) -> bool {
+        if !self.has_blocked_cells {
+            return true;
+        }
+        self.blocked_count_in(grid, row_min, row_max, col_min, col_max) == 0
     }
 
     pub(crate) fn segment_clear_index_to_index_with_crossings(
@@ -126,7 +136,7 @@ impl BarrierMask {
         let row_max = row0.max(row1 as f64).ceil().min(max_row) as usize;
         let col_min = col0.min(col1 as f64).floor().max(0.0) as usize;
         let col_max = col0.max(col1 as f64).ceil().min(max_col) as usize;
-        self.blocked_count_in(grid, row_min, row_max, col_min, col_max) == 0
+        self.cell_bounds_clear(grid, row_min, row_max, col_min, col_max)
     }
 
     fn blocked_count_in(
