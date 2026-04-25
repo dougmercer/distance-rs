@@ -12,7 +12,14 @@ import numpy as np
 import numpy.typing as npt
 
 from distance_rs import RasterSurface, distance_accumulation, optimal_path_as_line
-from distance_rs.baselines import compare_distances, raster_dijkstra, trace_raster_path
+from distance_rs.baselines import (
+    compare_distances,
+    path_cost_metrics,
+    raster_dijkstra,
+    trace_raster_path,
+    trace_path_mask,
+    whitebox_cost_distance,
+)
 
 
 def main() -> int:
@@ -39,6 +46,19 @@ def main() -> int:
         barriers=barriers,
     )
     dijkstra_line = trace_raster_path(dijkstra.parent, destination)
+    destinations = np.zeros_like(cost)
+    destinations[destination] = 1.0
+    whitebox = whitebox_cost_distance(
+        sources,
+        cost_surface=cost,
+        barriers=barriers,
+        destinations=destinations,
+    )
+    whitebox_path = (
+        np.isfinite(whitebox.pathway) & (whitebox.pathway > 0.0)
+        if whitebox.pathway is not None
+        else np.zeros_like(barriers)
+    )
     comparison = compare_distances(ordered.distance, dijkstra.distance)
 
     output_path = args.output_dir / "maze_route.png"
@@ -51,14 +71,26 @@ def main() -> int:
         ordered_line,
         dijkstra.distance,
         dijkstra_line,
+        whitebox_path,
         output_path,
     )
 
     print(f"wrote {output_path}")
     print(f"ordered-upwind destination cost: {ordered.distance[destination]:.2f}")
     print(f"8-neighbor destination cost: {dijkstra.distance[destination]:.2f}")
+    print(f"Whitebox destination cost: {whitebox.distance[destination]:.2f}")
     print(f"ordered-upwind route length: {polyline_length(ordered_line):.2f} cells")
     print(f"8-neighbor route length: {polyline_length(dijkstra_line):.2f} cells")
+    print_reference_surface_metrics(
+        RasterSurface(cost, barriers=barriers),
+        source,
+        destination,
+        {
+            "ordered-upwind": ordered_line,
+            "8-neighbor": dijkstra_line,
+            "Whitebox": trace_path_mask(whitebox_path, source, destination),
+        },
+    )
     print(f"distance rmse vs 8-neighbor: {comparison['rmse']:.2f}")
     print(f"barrier cells: {int(np.count_nonzero(barriers))}")
     return 0
@@ -90,6 +122,33 @@ def parse_args() -> argparse.Namespace:
     if args.scale < 3:
         parser.error("--scale must be at least 3")
     return args
+
+
+def print_reference_surface_metrics(
+    surface: RasterSurface,
+    source: tuple[int, int],
+    destination: tuple[int, int],
+    lines: dict[str, npt.NDArray[np.float64]],
+) -> None:
+    source_xy = (float(source[1]), float(source[0]))
+    destination_xy = (float(destination[1]), float(destination[0]))
+    print("\ndistance-rs surface evaluation")
+    print("solver        cost      time_min  distance")
+    print("------------  --------  --------  --------")
+    for name, line in lines.items():
+        if len(line) == 0:
+            print(f"{name:12}  n/a       n/a       n/a")
+            continue
+        metrics = path_cost_metrics(
+            surface,
+            line,
+            source_xy=source_xy,
+            destination_xy=destination_xy,
+        )
+        print(
+            f"{name:12}  {metrics.cost:8.2f}  "
+            f"{metrics.time_hours * 60.0:8.3f}  {metrics.distance:8.2f}"
+        )
 
 
 def make_case(
@@ -177,6 +236,7 @@ def plot_case(
     ordered_line: npt.NDArray[np.float64],
     dijkstra_distance: npt.NDArray[np.float64],
     dijkstra_line: npt.NDArray[np.float64],
+    whitebox_path: npt.NDArray[np.bool_],
     output_path: Path,
 ) -> None:
     import matplotlib.pyplot as plt
@@ -188,6 +248,13 @@ def plot_case(
     route_ax, difference_ax = axes
     draw_surface(route_ax, cost, barriers, barrier_cmap)
     route_ax.plot(dijkstra_line[:, 0], dijkstra_line[:, 1], color="#2c7bb6", lw=1.9)
+    route_ax.imshow(
+        np.ma.masked_where(~whitebox_path, whitebox_path),
+        cmap=ListedColormap(["#ffcc00"]),
+        origin="lower",
+        interpolation="nearest",
+        alpha=0.9,
+    )
     route_ax.plot(ordered_line[:, 0], ordered_line[:, 1], color="#d7191c", lw=2.3)
     draw_endpoints(route_ax, source, destination)
     route_ax.set_title("Maze route overlay")
@@ -216,8 +283,8 @@ def plot_case(
     difference_ax.set_ylabel("row")
     fig.colorbar(image, ax=difference_ax, shrink=0.78, label="OUM minus 8-neighbor cost")
 
-    route_ax.legend(handles=legend_handles(), loc="upper right")
-    fig.suptitle("Generated maze: ordered upwind vs 8-neighbor grid")
+    route_ax.legend(handles=legend_handles(), loc="lower right")
+    fig.suptitle("Generated maze: ordered upwind vs baselines")
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
 
@@ -267,6 +334,7 @@ def legend_handles() -> list[Any]:
         Patch(facecolor="white", edgecolor="black", label="maze walls"),
         Line2D([0], [0], color="#d7191c", lw=2.3, label="ordered upwind"),
         Line2D([0], [0], color="#2c7bb6", lw=1.9, label="8-neighbor Dijkstra"),
+        Patch(facecolor="#ffcc00", edgecolor="none", label="Whitebox CostDistance"),
         Line2D(
             [0],
             [0],

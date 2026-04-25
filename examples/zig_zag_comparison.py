@@ -11,8 +11,14 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from distance_rs import distance_accumulation, optimal_path_as_line
-from distance_rs.baselines import raster_dijkstra, trace_raster_path
+from distance_rs import RasterSurface, distance_accumulation, optimal_path_as_line
+from distance_rs.baselines import (
+    path_cost_metrics,
+    raster_dijkstra,
+    trace_path_mask,
+    trace_raster_path,
+    whitebox_cost_distance,
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,9 @@ class RoutePlot:
     case: RouteCase
     ordered_line: npt.NDArray[np.float64]
     dijkstra_line: npt.NDArray[np.float64]
+    whitebox_path: npt.NDArray[np.bool_]
+    whitebox_line: npt.NDArray[np.float64]
+    whitebox_cost: float
     dijkstra_envelope: DijkstraEnvelope
     metrics: RouteMetrics
 
@@ -77,14 +86,16 @@ def main() -> int:
     sources = np.zeros((rows, cols), dtype=np.float64)
     sources[source] = 1.0
     cost = np.ones((rows, cols), dtype=np.float64)
+    barriers = make_barriers(rows, cols, source, [case.destination for case in route_cases])
 
     ordered = distance_accumulation(
-        cost,
+        RasterSurface(cost, barriers=barriers),
         source=source,
     )
     dijkstra = raster_dijkstra(
         sources,
         cost_surface=cost,
+        barriers=barriers,
     )
 
     routes = []
@@ -92,6 +103,20 @@ def main() -> int:
         destination = route_case.destination
         ordered_line = optimal_path_as_line(ordered, destination)
         dijkstra_line = trace_raster_path(dijkstra.parent, destination)
+        destinations = np.zeros_like(cost)
+        destinations[destination] = 1.0
+        whitebox = whitebox_cost_distance(
+            sources,
+            cost_surface=cost,
+            barriers=barriers,
+            destinations=destinations,
+        )
+        whitebox_path = (
+            np.isfinite(whitebox.pathway) & (whitebox.pathway > 0.0)
+            if whitebox.pathway is not None
+            else np.zeros_like(barriers)
+        )
+        whitebox_line = trace_path_mask(whitebox_path, source, destination)
         dijkstra_envelope = equal_shortest_dijkstra_envelope(source, destination)
         route_metrics = compute_metrics(
             source,
@@ -105,14 +130,24 @@ def main() -> int:
                 case=route_case,
                 ordered_line=ordered_line,
                 dijkstra_line=dijkstra_line,
+                whitebox_path=whitebox_path,
+                whitebox_line=whitebox_line,
+                whitebox_cost=float(whitebox.distance[destination]),
                 dijkstra_envelope=dijkstra_envelope,
                 metrics=route_metrics,
             )
         )
 
     output_path = args.output_dir / "zig_zag_comparison.png"
-    plot_routes(cost, source, routes, output_path)
-    print_summary(routes, dijkstra.distance, ordered.distance, output_path)
+    plot_routes(cost, barriers, source, routes, output_path)
+    print_summary(
+        routes,
+        source,
+        RasterSurface(cost, barriers=barriers),
+        dijkstra.distance,
+        ordered.distance,
+        output_path,
+    )
     return 0
 
 
@@ -125,6 +160,21 @@ def parse_args() -> argparse.Namespace:
         help="Directory for the comparison plot.",
     )
     return parser.parse_args()
+
+
+def make_barriers(
+    rows: int,
+    cols: int,
+    source: tuple[int, int],
+    destinations: list[tuple[int, int]],
+) -> npt.NDArray[np.bool_]:
+    barriers = np.zeros((rows, cols), dtype=np.bool_)
+    barriers[5:34, 8:20] = True
+    barriers[83:113, 134:146] = True
+    barriers[48:54, 18:44] = True
+    for row, col in [source, *destinations]:
+        barriers[max(0, row - 1) : min(rows, row + 2), max(0, col - 1) : min(cols, col + 2)] = False
+    return barriers
 
 
 def compute_metrics(
@@ -147,11 +197,13 @@ def compute_metrics(
 
 def plot_routes(
     cost: npt.NDArray[np.float64],
+    barriers: npt.NDArray[np.bool_],
     source: tuple[int, int],
     routes: list[RoutePlot],
     output_path: Path,
 ) -> None:
     import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
 
     fig, axes = plt.subplots(
         2,
@@ -170,13 +222,21 @@ def plot_routes(
         ax = axes[0, column]
         error_ax = axes[1, column]
         ax.imshow(
-            cost,
+            np.ma.masked_where(barriers, cost),
             cmap="Greys",
             origin="lower",
             vmin=0.0,
             vmax=1.2,
             interpolation="nearest",
             alpha=0.18,
+        )
+        ax.imshow(
+            np.ma.masked_where(~barriers, barriers),
+            cmap=ListedColormap(["#f0f0f0"]),
+            origin="lower",
+            interpolation="nearest",
+            alpha=1.0,
+            zorder=1,
         )
         ax.set_xticks(np.arange(-0.5, cost.shape[1], 10), minor=True)
         ax.set_yticks(np.arange(-0.5, cost.shape[0], 10), minor=True)
@@ -221,6 +281,14 @@ def plot_routes(
             linewidth=2.1,
             zorder=3,
             label="ordered upwind",
+        )
+        ax.imshow(
+            np.ma.masked_where(~route.whitebox_path, route.whitebox_path),
+            cmap=ListedColormap(["#ffcc00"]),
+            origin="lower",
+            interpolation="nearest",
+            alpha=0.78,
+            zorder=3,
         )
         ax.plot(
             dijkstra_line[:, 0],
@@ -311,7 +379,7 @@ def plot_routes(
         error_ax.set_ylabel("cells^2")
         error_ax.grid(True, color="#d0d0d0", linewidth=0.5)
 
-    fig.suptitle("Flat unit-cost routes: Dijkstra is exact at 45 deg, then drifts off-axis")
+    fig.suptitle("Flat unit-cost routes with shared barriers: ordered upwind vs baselines")
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
 
@@ -625,30 +693,87 @@ def path_area_from_straight_line(
 
 def print_summary(
     routes: list[RoutePlot],
+    source: tuple[int, int],
+    surface: RasterSurface,
     dijkstra_distance: npt.NDArray[np.float64],
     ordered_distance: npt.NDArray[np.float64],
     output_path: Path,
 ) -> None:
     print(
-        "angle  destination   direct  ordered_cost  dijkstra_cost  ordered_area  dijkstra_area  equal_paths"
+        "angle  destination   direct  ordered_cost  dijkstra_cost  whitebox_cost  "
+        "rs_ordered  rs_dijkstra  rs_whitebox  equal_paths"
     )
     print(
-        "-----  -----------  ------  ------------  -------------  ------------  -------------  -----------"
+        "-----  -----------  ------  ------------  -------------  -------------  "
+        "----------  -----------  -----------  -----------"
     )
     for route in routes:
         route_case = route.case
         destination = route_case.destination
         metrics = route.metrics
+        source_xy = (float(source[1]), float(source[0]))
+        destination_xy = (float(destination[1]), float(destination[0]))
+        ordered_ref = path_cost_metrics(
+            surface,
+            route.ordered_line,
+            source_xy=source_xy,
+            destination_xy=destination_xy,
+        )
+        dijkstra_ref = path_cost_metrics(
+            surface,
+            route.dijkstra_line,
+            source_xy=source_xy,
+            destination_xy=destination_xy,
+        )
+        whitebox_ref = (
+            None
+            if len(route.whitebox_line) == 0
+            else path_cost_metrics(
+                surface,
+                route.whitebox_line,
+                source_xy=source_xy,
+                destination_xy=destination_xy,
+            )
+        )
         print(
             f"{route_case.angle_degrees:5.0f}  "
             f"{destination!s:>11}  "
             f"{metrics.direct_length:6.2f}  "
             f"{ordered_distance[destination]:12.2f}  "
             f"{dijkstra_distance[destination]:13.2f}  "
-            f"{metrics.ordered_area:12.2f}  "
-            f"{metrics.dijkstra_area:13.2f}  "
+            f"{route.whitebox_cost:13.2f}  "
+            f"{ordered_ref.cost:10.2f}  "
+            f"{dijkstra_ref.cost:11.2f}  "
+            f"{format_optional_float(None if whitebox_ref is None else whitebox_ref.cost):>11}  "
             f"{format_path_count(metrics.equal_dijkstra_path_count):>11}"
         )
+    print("\ndistance-rs surface evaluation (time assumes 5 km/h)")
+    print("angle  solver          cost       time_min  distance")
+    print("-----  --------------  ---------  --------  --------")
+    for route in routes:
+        route_case = route.case
+        destination = route_case.destination
+        source_xy = (float(source[1]), float(source[0]))
+        destination_xy = (float(destination[1]), float(destination[0]))
+        solver_lines = {
+            "ordered": route.ordered_line,
+            "dijkstra": route.dijkstra_line,
+            "whitebox": route.whitebox_line,
+        }
+        for solver, line in solver_lines.items():
+            if len(line) == 0:
+                print(f"{route_case.angle_degrees:5.0f}  {solver:14}  n/a        n/a       n/a")
+                continue
+            ref = path_cost_metrics(
+                surface,
+                line,
+                source_xy=source_xy,
+                destination_xy=destination_xy,
+            )
+            print(
+                f"{route_case.angle_degrees:5.0f}  {solver:14}  "
+                f"{ref.cost:9.2f}  {ref.time_hours * 60.0:8.3f}  {ref.distance:8.2f}"
+            )
     print(f"\nplot: {output_path}")
 
 
@@ -656,6 +781,10 @@ def format_path_count(count: int) -> str:
     if count < 1_000_000:
         return f"{count:,}"
     return f"{float(count):.3e}"
+
+
+def format_optional_float(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}"
 
 
 if __name__ == "__main__":

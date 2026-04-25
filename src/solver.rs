@@ -4,6 +4,7 @@ use std::collections::BinaryHeap;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyAny;
 
 use crate::barriers::BarrierMask;
 use crate::grid::{Grid, StencilOffset};
@@ -77,6 +78,53 @@ impl Parent {
     }
 }
 
+struct ProgressReporter<'py, 'a> {
+    callback: Option<&'a Bound<'py, PyAny>>,
+    total: usize,
+    every: usize,
+    accepted: usize,
+    next_report: usize,
+}
+
+impl<'py, 'a> ProgressReporter<'py, 'a> {
+    fn new(callback: Option<&'a Bound<'py, PyAny>>, total: usize, every: usize) -> Self {
+        Self {
+            callback,
+            total,
+            every,
+            accepted: 0,
+            next_report: every,
+        }
+    }
+
+    fn set_accepted(&mut self, accepted: usize) -> PyResult<()> {
+        self.accepted = accepted;
+        self.maybe_report(false)
+    }
+
+    fn increment(&mut self) -> PyResult<()> {
+        self.accepted += 1;
+        self.maybe_report(false)
+    }
+
+    fn finish(&mut self) -> PyResult<()> {
+        self.maybe_report(true)
+    }
+
+    fn maybe_report(&mut self, force: bool) -> PyResult<()> {
+        let Some(callback) = self.callback else {
+            return Ok(());
+        };
+        if force || self.accepted >= self.next_report {
+            callback.call1((self.accepted, self.total))?;
+            while self.accepted >= self.next_report {
+                self.next_report += self.every;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct Solver {
     pub(crate) grid: Grid,
     pub(crate) cost: Vec<f64>,
@@ -139,12 +187,22 @@ impl Solver {
         mut self,
         source_indices: &[usize],
         target_indices: Option<&[usize]>,
+        progress_callback: Option<&Bound<'_, PyAny>>,
+        progress_interval: usize,
     ) -> PyResult<SolveOutput> {
         if source_indices.is_empty() {
             return Err(PyValueError::new_err(
                 "at least one source cell is required",
             ));
         }
+
+        let total_valid = if progress_callback.is_some() {
+            self.valid_count()
+        } else {
+            0
+        };
+        let mut progress =
+            ProgressReporter::new(progress_callback, total_valid, progress_interval.max(1));
 
         for &idx in source_indices {
             if self.is_valid(idx) {
@@ -171,7 +229,9 @@ impl Solver {
                 remaining_targets -= 1;
             }
         }
+        progress.set_accepted(self.accepted_count())?;
         if target_indices.is_some() && remaining_targets == 0 {
+            progress.finish()?;
             return Ok(self.into_output());
         }
 
@@ -188,6 +248,7 @@ impl Solver {
             }
 
             self.state[entry.idx] = ACCEPTED;
+            progress.increment()?;
             if !target_mask.is_empty() && target_mask[entry.idx] {
                 target_mask[entry.idx] = false;
                 remaining_targets -= 1;
@@ -198,6 +259,7 @@ impl Solver {
             self.update_around_incremental(entry.idx);
         }
 
+        progress.finish()?;
         Ok(self.into_output())
     }
 
@@ -244,6 +306,19 @@ impl Solver {
 
     pub(crate) fn is_valid(&self, idx: usize) -> bool {
         self.barriers.is_valid(idx)
+    }
+
+    fn valid_count(&self) -> usize {
+        (0..self.distance.len())
+            .filter(|&idx| self.is_valid(idx))
+            .count()
+    }
+
+    fn accepted_count(&self) -> usize {
+        self.state
+            .iter()
+            .filter(|&&state| state == ACCEPTED)
+            .count()
     }
 
     pub(crate) fn is_accepted(&self, idx: usize) -> bool {

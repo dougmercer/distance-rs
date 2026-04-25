@@ -24,6 +24,21 @@ pub(crate) struct TraceRequest<'a> {
     pub(crate) max_steps: usize,
 }
 
+pub(crate) struct TraceOutput {
+    pub(crate) coords: Vec<f64>,
+    pub(crate) metadata: TraceMetadata,
+}
+
+#[derive(Default)]
+pub(crate) struct TraceMetadata {
+    pub(crate) direction_steps: usize,
+    pub(crate) parent_lattice_fallbacks: usize,
+    pub(crate) proposed_cell_center_fallbacks: usize,
+    pub(crate) current_cell_center_fallbacks: usize,
+    pub(crate) direct_parent_point_fallbacks: usize,
+    pub(crate) non_descending_rejections: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TracePoint {
     row: f64,
@@ -82,7 +97,7 @@ impl TraceCursor {
     }
 }
 
-pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, PathTraceError> {
+pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<TraceOutput, PathTraceError> {
     let shape = request.distance.shape();
     let rows = shape[0];
     let cols = shape[1];
@@ -123,6 +138,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
     let mut coords = Vec::with_capacity(step_limit.min(1024) * 2);
     let mut cursor = TraceCursor::new(request.start_row, request.start_col, rows, cols);
     let mut segment_crossings = Vec::new();
+    let mut metadata = TraceMetadata::default();
     let mut guard = 0usize;
 
     push_world_coord(
@@ -166,6 +182,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
             request.cell_size_x,
             request.cell_size_y,
             &mut segment_crossings,
+            &mut metadata,
         )?;
         cursor.move_to(next);
 
@@ -186,7 +203,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
         }
     }
 
-    Ok(coords)
+    Ok(TraceOutput { coords, metadata })
 }
 
 fn path_trace_error(reason: &str) -> PathTraceError {
@@ -242,32 +259,68 @@ fn next_clear_trace_step(
     cell_size_x: f64,
     cell_size_y: f64,
     segment_crossings: &mut Vec<f64>,
+    metadata: &mut TraceMetadata,
 ) -> Result<TracePoint, PathTraceError> {
     if degrees.is_finite() {
         if let Ok(proposed) = next_trace_step(cursor, degrees, cell_size_x, cell_size_y) {
-            if let Some(step) = clear_continuable_step(
+            if let Some((step, used_center)) = clear_continuable_step(
                 request,
                 cursor,
                 proposed,
                 cell_size_x,
                 cell_size_y,
                 segment_crossings,
+                metadata,
             )? {
+                if used_center {
+                    metadata.proposed_cell_center_fallbacks += 1;
+                } else {
+                    metadata.direction_steps += 1;
+                }
                 return Ok(step);
             }
         }
     }
 
     let parent_step = next_trace_step_toward(cursor, parent_point)?;
-    if let Some(step) = clear_continuable_step(
+    if let Some((step, used_center)) = clear_continuable_step(
         request,
         cursor,
         parent_step,
         cell_size_x,
         cell_size_y,
         segment_crossings,
+        metadata,
     )? {
+        if used_center {
+            metadata.proposed_cell_center_fallbacks += 1;
+        } else {
+            metadata.parent_lattice_fallbacks += 1;
+        }
         return Ok(step);
+    }
+
+    let (row, col) = cursor.current_cell()?;
+    let center = TracePoint::at_cell_center(row, col);
+    if !cursor.point.is_near(center)
+        && trace_segment_clear(request, cursor.point, center, segment_crossings)
+        && trace_can_continue_from(request, center, cell_size_x, cell_size_y, segment_crossings)?
+    {
+        metadata.current_cell_center_fallbacks += 1;
+        return Ok(center);
+    }
+
+    if trace_segment_clear(request, cursor.point, parent_point, segment_crossings)
+        && trace_can_continue_from(
+            request,
+            parent_point,
+            cell_size_x,
+            cell_size_y,
+            segment_crossings,
+        )?
+    {
+        metadata.direct_parent_point_fallbacks += 1;
+        return Ok(parent_point);
     }
 
     Err(path_trace_error("crossed a non-finite cell"))
@@ -280,8 +333,13 @@ fn clear_continuable_step(
     cell_size_x: f64,
     cell_size_y: f64,
     segment_crossings: &mut Vec<f64>,
-) -> Result<Option<TracePoint>, PathTraceError> {
+    metadata: &mut TraceMetadata,
+) -> Result<Option<(TracePoint, bool)>, PathTraceError> {
     if !trace_segment_clear(request, cursor.point, proposed, segment_crossings) {
+        return Ok(None);
+    }
+    if !is_descending_step(request, cursor, proposed)? {
+        metadata.non_descending_rejections += 1;
         return Ok(None);
     }
     if trace_can_continue_from(
@@ -291,7 +349,7 @@ fn clear_continuable_step(
         cell_size_y,
         segment_crossings,
     )? {
-        return Ok(Some(proposed));
+        return Ok(Some((proposed, false)));
     }
 
     let (row, col) = cell_for_point(proposed, cursor.rows, cursor.cols)?;
@@ -299,9 +357,34 @@ fn clear_continuable_step(
     if !proposed.is_near(center)
         && trace_segment_clear(request, cursor.point, center, segment_crossings)
     {
-        return Ok(Some(center));
+        return Ok(Some((center, true)));
     }
     Ok(None)
+}
+
+fn is_descending_step(
+    request: &TraceRequest<'_>,
+    cursor: &TraceCursor,
+    proposed: TracePoint,
+) -> Result<bool, PathTraceError> {
+    let shape = request.distance.shape();
+    let (current_row, current_col) = cursor.current_cell()?;
+    let (next_row, next_col) = cell_for_point(proposed, shape[0], shape[1])?;
+    if current_row == next_row && current_col == next_col {
+        return Ok(!proposed.is_near(cursor.point));
+    }
+
+    let current = request.distance[[current_row, current_col]];
+    let next = request.distance[[next_row, next_col]];
+    if !current.is_finite() || !next.is_finite() {
+        return Ok(false);
+    }
+    if parent_trace_point(request, next_row, next_col)?.is_none() {
+        return Ok(true);
+    }
+
+    let tolerance = 1.0e-10_f64.max(current.abs().max(next.abs()) * 1.0e-12);
+    Ok(next + tolerance < current)
 }
 
 fn trace_can_continue_from(

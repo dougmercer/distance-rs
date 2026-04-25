@@ -14,6 +14,13 @@ import numpy.typing as npt
 
 from distance_rs import DistanceAccumulationResult, RasterSurface, distance_accumulation
 from distance_rs import optimal_path_as_line
+from distance_rs.baselines import (
+    path_cost_metrics,
+    raster_dijkstra,
+    trace_path_mask,
+    trace_raster_path,
+    whitebox_cost_distance,
+)
 
 
 Point = tuple[float, float]
@@ -40,8 +47,26 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     source, destination, cost, barriers = make_case()
+    sources = np.zeros_like(cost)
+    sources[source] = 1.0
+    destinations = np.zeros_like(cost)
+    destinations[destination] = 1.0
+
     result = distance_accumulation(RasterSurface(cost, barriers=barriers), source=source)
     current_line = one_line(optimal_path_as_line(result, destination))
+    dijkstra = raster_dijkstra(sources, cost_surface=cost, barriers=barriers)
+    dijkstra_line = trace_raster_path(dijkstra.parent, destination)
+    whitebox = whitebox_cost_distance(
+        sources,
+        cost_surface=cost,
+        barriers=barriers,
+        destinations=destinations,
+    )
+    whitebox_path = (
+        np.isfinite(whitebox.pathway) & (whitebox.pathway > 0.0)
+        if whitebox.pathway is not None
+        else np.zeros_like(barriers)
+    )
 
     parent_replay = parent_direction_replay(result)
     parent_direction_line = one_line(optimal_path_as_line(parent_replay.result, destination))
@@ -55,6 +80,8 @@ def main() -> int:
         barriers,
         current_line,
         parent_direction_line,
+        dijkstra_line,
+        whitebox_path,
         parent_replay,
         comparison,
         output_path,
@@ -63,6 +90,19 @@ def main() -> int:
     changed_angles = parent_replay.angle_delta[np.isfinite(parent_replay.angle_delta)]
     print(f"wrote {output_path}")
     print(f"current route length: {comparison.current_length:.2f} cells")
+    print(f"8-neighbor destination cost: {dijkstra.distance[destination]:.2f}")
+    print(f"Whitebox destination cost: {whitebox.distance[destination]:.2f}")
+    print_reference_surface_metrics(
+        RasterSurface(cost, barriers=barriers),
+        source,
+        destination,
+        {
+            "current": current_line,
+            "parent replay": parent_direction_line,
+            "8-neighbor": dijkstra_line,
+            "Whitebox": trace_path_mask(whitebox_path, source, destination),
+        },
+    )
     print(f"parent-direction replay length: {comparison.parent_direction_length:.2f} cells")
     print(f"max route offset after arclength resampling: {comparison.max_offset:.2f} cells")
     print(f"mean route offset after arclength resampling: {comparison.mean_offset:.2f} cells")
@@ -80,6 +120,33 @@ def parse_args() -> argparse.Namespace:
         help="Directory for the output plot.",
     )
     return parser.parse_args()
+
+
+def print_reference_surface_metrics(
+    surface: RasterSurface,
+    source: tuple[int, int],
+    destination: tuple[int, int],
+    lines: dict[str, npt.NDArray[np.float64]],
+) -> None:
+    source_xy = (float(source[1]), float(source[0]))
+    destination_xy = (float(destination[1]), float(destination[0]))
+    print("\ndistance-rs surface evaluation")
+    print("solver          cost      time_min  distance")
+    print("--------------  --------  --------  --------")
+    for name, line in lines.items():
+        if len(line) == 0:
+            print(f"{name:14}  n/a       n/a       n/a")
+            continue
+        metrics = path_cost_metrics(
+            surface,
+            line,
+            source_xy=source_xy,
+            destination_xy=destination_xy,
+        )
+        print(
+            f"{name:14}  {metrics.cost:8.2f}  "
+            f"{metrics.time_hours * 60.0:8.3f}  {metrics.distance:8.2f}"
+        )
 
 
 def make_case() -> tuple[
@@ -120,6 +187,7 @@ def make_case() -> tuple[
     source = logical_maze_cell_center(0, 0, scale)
     destination = (80, 175)
     clear_endpoint(barriers, cost, source)
+    clear_endpoint(barriers, cost, destination)
     return source, destination, cost, barriers
 
 
@@ -289,6 +357,8 @@ def plot_case(
     barriers: npt.NDArray[np.bool_],
     current_line: npt.NDArray[np.float64],
     parent_direction_line: npt.NDArray[np.float64],
+    dijkstra_line: npt.NDArray[np.float64],
+    whitebox_path: npt.NDArray[np.bool_],
     parent_replay: ReplayResult,
     comparison: RouteComparison,
     output_path: Path,
@@ -303,12 +373,12 @@ def plot_case(
     full_ax, zoom_ax, segment_ax = axes
 
     draw_surface(full_ax, cost, barriers, barrier_cmap)
-    draw_routes(full_ax, current_line, parent_direction_line)
+    draw_routes(full_ax, current_line, parent_direction_line, dijkstra_line, whitebox_path)
     draw_endpoints(full_ax, source, destination)
     full_ax.set_title("Full route overlay")
 
     draw_surface(zoom_ax, cost, barriers, barrier_cmap)
-    draw_routes(zoom_ax, current_line, parent_direction_line)
+    draw_routes(zoom_ax, current_line, parent_direction_line, dijkstra_line, whitebox_path)
     zoom_ax.scatter(
         [comparison.zoom_center[0]],
         [comparison.zoom_center[1]],
@@ -337,7 +407,9 @@ def plot_case(
         alpha=0.52,
         zorder=2,
     )
-    draw_routes(segment_ax, current_line, parent_direction_line, lw=1.7)
+    draw_routes(
+        segment_ax, current_line, parent_direction_line, dijkstra_line, whitebox_path, lw=1.7
+    )
     draw_endpoints(segment_ax, source, destination)
     segment_ax.set_title("Cells replayed with parent directions")
 
@@ -349,6 +421,7 @@ def plot_case(
     legend_handles = [
         Patch(facecolor="white", edgecolor="black", label="barrier cells"),
         Patch(facecolor="#2166ac", edgecolor="none", alpha=0.52, label="segment-parent cells"),
+        Patch(facecolor="#ffcc00", edgecolor="none", label="Whitebox CostDistance"),
         Line2D([0], [0], color="#d7191c", lw=2.4, label="surface-direction path"),
         Line2D(
             [0],
@@ -358,6 +431,7 @@ def plot_case(
             ls="--",
             label="parent-direction replay",
         ),
+        Line2D([0], [0], color="#4daf4a", lw=1.6, ls=":", label="8-neighbor Dijkstra"),
         Line2D(
             [0],
             [0],
@@ -424,9 +498,24 @@ def draw_routes(
     ax: Any,
     current_line: npt.NDArray[np.float64],
     parent_direction_line: npt.NDArray[np.float64],
+    dijkstra_line: npt.NDArray[np.float64],
+    whitebox_path: npt.NDArray[np.bool_],
     *,
     lw: float = 2.4,
 ) -> None:
+    from matplotlib.colors import ListedColormap
+
+    ax.imshow(
+        np.ma.masked_where(~whitebox_path, whitebox_path),
+        cmap=ListedColormap(["#ffcc00"]),
+        origin="lower",
+        interpolation="nearest",
+        alpha=0.62,
+        zorder=3,
+    )
+    ax.plot(
+        dijkstra_line[:, 0], dijkstra_line[:, 1], color="#4daf4a", lw=lw * 0.68, ls=":", zorder=4
+    )
     ax.plot(current_line[:, 0], current_line[:, 1], color="#d7191c", lw=lw, zorder=5)
     ax.plot(
         parent_direction_line[:, 0],

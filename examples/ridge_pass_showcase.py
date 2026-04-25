@@ -16,7 +16,6 @@ import argparse
 import json
 import math
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,14 +31,14 @@ from distance_rs import (
     distance_accumulation,
 )
 from distance_rs.baselines import (
-    MIN_COST,
-    WHITEBOX_NODATA,
+    PathCostMetrics,
     compare_distances,
     json_safe,
+    path_cost_metrics,
     raster_dijkstra,
-    read_whitebox_raster,
+    trace_path_mask,
     trace_raster_path,
-    write_whitebox_raster,
+    whitebox_cost_distance,
 )
 
 
@@ -64,6 +63,7 @@ class RouteResult:
     destination_cost: float
     line_xy: npt.NDArray[np.float64] | None = None
     path_mask: npt.NDArray[np.bool_] | None = None
+    reference_metrics: PathCostMetrics | None = None
     status: str = "ok"
     error: str | None = None
     note: str | None = None
@@ -199,6 +199,23 @@ def make_case(*, rows: int, cols: int, cell_size: float, cutoff_degrees: float) 
     cost = 3.0 - 2.55 * straight_road - 2.05 * saddle_ramp - 0.45 * saddle_floor + texture
     cost = np.maximum(cost, 0.28).astype(np.float64)
 
+    # A short cliff band forces every solver to honor impassable cells. The
+    # saddle gap remains open, so this reinforces the terrain-aware story rather
+    # than replacing it with a maze.
+    wall_col = int(round(cols * 0.42))
+    wall_half_width = max(1, cols // 90)
+    gap_center = int(round(rows * 0.24))
+    gap_half_height = max(2, rows // 14)
+    barriers[:, max(0, wall_col - wall_half_width) : min(cols, wall_col + wall_half_width + 1)] = (
+        True
+    )
+    barriers[
+        max(0, gap_center - gap_half_height) : min(rows, gap_center + gap_half_height + 1),
+        max(0, wall_col - wall_half_width) : min(cols, wall_col + wall_half_width + 1),
+    ] = False
+    barriers[source] = False
+    barriers[destination] = False
+
     vertical_factor = VerticalFactor.from_any(
         {
             "type": "binary",
@@ -244,6 +261,7 @@ def run_ordered_upwind(case: CaseData) -> RouteResult:
         elapsed_sec=elapsed,
         destination_cost=destination_cost,
         line_xy=line_xy,
+        reference_metrics=reference_metrics(case, line_xy),
         note="Continuous ordered-upwind update with elevation and vertical-factor cutoff.",
     )
 
@@ -276,81 +294,49 @@ def run_raster_dijkstra(case: CaseData) -> RouteResult:
         elapsed_sec=elapsed,
         destination_cost=destination_cost,
         line_xy=line_xy,
+        reference_metrics=reference_metrics(case, line_xy),
         note="Same cost, elevation, and vertical-factor rules, but constrained to 8 neighbors.",
     )
 
 
 def run_whitebox(case: CaseData) -> RouteResult:
-    try:
-        import whitebox
-    except ImportError as exc:
-        raise RuntimeError(
-            "Whitebox is optional. Run `uv sync --group whitebox` to include "
-            "the friction-only Whitebox route in this example."
-        ) from exc
+    destination = np.zeros(case.cost.shape, dtype=np.float64)
+    destination[case.destination] = 1.0
 
-    with tempfile.TemporaryDirectory(prefix="distance-rs-ridge-whitebox-") as tmp_name:
-        tmp = Path(tmp_name)
-        source_path = tmp / "source.dep"
-        cost_path = tmp / "cost.dep"
-        dest_path = tmp / "destination.dep"
-        accum_path = tmp / "accum.dep"
-        backlink_path = tmp / "backlink.dep"
-        pathway_path = tmp / "pathway.dep"
-
-        valid_cost = np.isfinite(case.cost) & ~case.barriers
-        source = np.full(case.sources.shape, WHITEBOX_NODATA, dtype=np.float64)
-        source[(case.sources != 0.0) & np.isfinite(case.sources) & valid_cost] = 1.0
-        cost = np.where(valid_cost, np.maximum(case.cost, MIN_COST), WHITEBOX_NODATA)
-        destination = np.zeros(case.cost.shape, dtype=np.float64)
-        destination[case.destination] = 1.0
-
-        write_whitebox_raster(source_path, source, cell_size=case.cell_size, nodata=WHITEBOX_NODATA)
-        write_whitebox_raster(cost_path, cost, cell_size=case.cell_size, nodata=WHITEBOX_NODATA)
-        write_whitebox_raster(
-            dest_path,
-            destination,
-            cell_size=case.cell_size,
-            nodata=WHITEBOX_NODATA,
-        )
-
-        wbt = whitebox.WhiteboxTools()
-        wbt.set_working_dir(str(tmp))
-        if hasattr(wbt, "set_verbose_mode"):
-            wbt.set_verbose_mode(False)
-
-        start = time.perf_counter()
-        exit_code = wbt.cost_distance(
-            source_path.name,
-            cost_path.name,
-            accum_path.name,
-            backlink_path.name,
-            callback=lambda _message: None,
-        )
-        if exit_code not in (0, None):
-            raise RuntimeError(f"Whitebox CostDistance failed with exit code {exit_code}")
-        exit_code = wbt.cost_pathway(
-            dest_path.name,
-            backlink_path.name,
-            pathway_path.name,
-            zero_background=True,
-            callback=lambda _message: None,
-        )
-        if exit_code not in (0, None):
-            raise RuntimeError(f"Whitebox CostPathway failed with exit code {exit_code}")
-        elapsed = time.perf_counter() - start
-
-        distance = read_whitebox_raster(accum_path, nodata_as_inf=True)
-        pathway = read_whitebox_raster(pathway_path, nodata_as_inf=False)
-        path_mask = np.isfinite(pathway) & (pathway > 0.0)
-
+    start = time.perf_counter()
+    result = whitebox_cost_distance(
+        case.sources,
+        cost_surface=case.cost,
+        barriers=case.barriers,
+        cell_size=case.cell_size,
+        destinations=destination,
+    )
+    elapsed = time.perf_counter() - start
+    pathway = result.pathway
+    path_mask = (
+        np.isfinite(pathway) & (pathway > 0.0)
+        if pathway is not None
+        else np.zeros(case.cost.shape, dtype=bool)
+    )
+    line_xy = trace_path_mask(
+        path_mask,
+        case.source,
+        case.destination,
+        cell_size=case.cell_size,
+        origin=origin_for_case(case),
+    )
     return RouteResult(
         solver="whitebox_cost_distance",
-        distance=distance,
+        distance=result.distance,
         elapsed_sec=elapsed,
-        destination_cost=float(distance[case.destination]),
+        destination_cost=float(result.distance[case.destination]),
         path_mask=path_mask,
-        note="Friction-only CostDistance route; elevation and vertical-factor cutoff are not inputs.",
+        reference_metrics=reference_metrics(case, line_xy),
+        note=(
+            "Friction-only CostDistance route with barriers burned into the "
+            "Whitebox cost raster as NoData; elevation and vertical-factor "
+            "cutoff are not inputs."
+        ),
     )
 
 
@@ -502,6 +488,13 @@ def write_metadata(
                 "status": result.status,
                 "elapsed_sec": result.elapsed_sec,
                 "destination_cost": result.destination_cost,
+                "distance_rs_surface": None
+                if result.reference_metrics is None
+                else {
+                    "cost": result.reference_metrics.cost,
+                    "time_hours": result.reference_metrics.time_hours,
+                    "distance_m": result.reference_metrics.distance,
+                },
                 "path_length_m": None if result.line_xy is None else path_length(result.line_xy),
                 "path_vertices": None if result.line_xy is None else int(len(result.line_xy)),
                 "path_cells": None
@@ -527,15 +520,25 @@ def print_summary(
     print(f"  direct road max slope angle: {max_row_slope(case, case.source[0]):.1f} deg")
     print(f"  saddle row max slope angle:  {max_row_slope(case, saddle_row(case)):.1f} deg")
     print(f"  vertical cutoff:             +/-{case.cutoff_degrees:.1f} deg")
-    print("\nsolver                   status      seconds     destination_cost  path_length_m")
-    print("-----------------------  ----------  ----------  ----------------  -------------")
+    print(
+        "\nsolver                   status      seconds     destination_cost  "
+        "path_length_m  rs_cost     rs_time_min  rs_distance_m"
+    )
+    print(
+        "-----------------------  ----------  ----------  ----------------  "
+        "-------------  ----------  -----------  -------------"
+    )
     for result in results:
         length = None if result.line_xy is None else path_length(result.line_xy)
+        ref = result.reference_metrics
         print(
             f"{result.solver:23}  {result.status:10}  "
             f"{format_metric(result.elapsed_sec):>10}  "
             f"{format_metric(result.destination_cost):>16}  "
-            f"{format_optional_metric(length):>13}"
+            f"{format_optional_metric(length):>13}  "
+            f"{format_optional_metric(None if ref is None else ref.cost):>10}  "
+            f"{format_optional_metric(None if ref is None else ref.time_hours * 60.0):>11}  "
+            f"{format_optional_metric(None if ref is None else ref.distance):>13}"
         )
         if result.status != "ok" and result.error:
             print(f"  {result.solver}: {result.error}")
@@ -564,6 +567,26 @@ def saddle_row(case: CaseData) -> int:
 def cell_to_xy(case: CaseData, row: int, col: int) -> tuple[float, float]:
     origin_x, origin_y = origin_for_case(case)
     return origin_x + col * case.cell_size, origin_y + row * case.cell_size
+
+
+def reference_metrics(
+    case: CaseData,
+    line_xy: npt.NDArray[np.float64],
+) -> PathCostMetrics | None:
+    if len(line_xy) == 0:
+        return None
+    return path_cost_metrics(
+        RasterSurface(
+            case.cost,
+            grid=RasterGrid(cell_size=case.cell_size, origin=origin_for_case(case)),
+            elevation=case.elevation,
+            barriers=case.barriers,
+        ),
+        line_xy,
+        vertical_factor=case.vertical_factor,
+        source_xy=cell_to_xy(case, *case.source),
+        destination_xy=cell_to_xy(case, *case.destination),
+    )
 
 
 def origin_for_case(case: CaseData) -> tuple[float, float]:

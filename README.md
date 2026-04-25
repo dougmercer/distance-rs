@@ -28,8 +28,8 @@ path tracing, with barrier cases falling back to the verified parent segment.
 
 The repository pins Python 3.13 in `.python-version` so geospatial
 dependencies such as Fiona can resolve prebuilt wheels on macOS.
-The base package depends only on NumPy; install the `geo` extra for GeoTIFF,
-GeoJSON, GeoPackage, and Shapely adapters.
+The base package depends only on NumPy and tqdm; install the `geo` extra for
+GeoTIFF, GeoJSON, GeoPackage, and Shapely adapters.
 
 ```bash
 uv sync --extra geo
@@ -55,6 +55,8 @@ ground truth for anisotropic continuous travel.
 
 Use `--json path/to/results.json` to save machine-readable results, and
 `--cases all` to include the one-way downslope binary vertical-factor case.
+Add `--progress` to show `tqdm` bars for the ordered-upwind solver and the
+local raster Dijkstra baseline.
 
 To include WhiteboxTools CostDistance as a customer-facing comparison:
 
@@ -239,6 +241,7 @@ from distance_rs import (
     RasterGrid,
     RasterSurface,
     distance_accumulation,
+    evaluate_path_cost,
     optimal_path_as_line,
 )
 
@@ -261,7 +264,18 @@ result = distance_accumulation(
 )
 
 line = optimal_path_as_line(result, destination=(90, 90))
+forward_cost = evaluate_path_cost(
+    surface,
+    line[::-1],
+    vertical_factor={"type": "bidir_hiking_time"},
+)
 ```
 
 The native solver uses a local 3-by-3 Eikonal stencil to avoid skipping
 intervening raster costs or barriers.
+`evaluate_path_cost` accepts any x/y line, including a Dijkstra trace or a
+GeoJSON/Shapely LineString. Pass a `RasterSurface` for solver-grid coordinates,
+or a `GeoSurface` from `load_surface` for projected map coordinates. The line is
+directional; reverse destination-to-source traces before evaluating
+source-to-destination travel. For long sparse LineStrings, pass `max_step=` to
+subdivide segments before sampling the raster surface.

@@ -12,7 +12,6 @@ import argparse
 import json
 import math
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,15 +27,15 @@ from distance_rs import (
     distance_accumulation,
 )
 from distance_rs.baselines import (
-    MIN_COST,
-    WHITEBOX_NODATA,
+    PathCostMetrics,
     compare_distances,
     json_safe,
     normalize_cell_size,
+    path_cost_metrics,
     raster_dijkstra,
-    read_whitebox_raster,
+    trace_path_mask,
     trace_raster_path,
-    write_whitebox_raster,
+    whitebox_cost_distance,
 )
 
 METER_PER_MILE = 1609.344
@@ -63,6 +62,7 @@ class RouteResult:
     destination_cost: float
     line_xy: npt.NDArray[np.float64] | None = None
     path_mask: npt.NDArray[np.bool_] | None = None
+    reference_metrics: PathCostMetrics | None = None
     status: str = "ok"
     error: str | None = None
 
@@ -308,6 +308,7 @@ def run_ordered_upwind(
         elapsed_sec=elapsed,
         destination_cost=destination_cost,
         line_xy=line_xy,
+        reference_metrics=reference_metrics(case, destination, line_xy),
     )
 
 
@@ -336,79 +337,42 @@ def run_raster_dijkstra(case: CaseData, destination: tuple[int, int]) -> RouteRe
         elapsed_sec=elapsed,
         destination_cost=destination_cost,
         line_xy=line_xy,
+        reference_metrics=reference_metrics(case, destination, line_xy),
     )
 
 
 def run_whitebox(case: CaseData, destination: tuple[int, int]) -> RouteResult:
-    try:
-        import whitebox
-    except ImportError as exc:
-        raise RuntimeError(
-            "Whitebox plotting requested but the 'whitebox' package is not installed. "
-            "Run 'uv sync --group whitebox' first."
-        ) from exc
-
-    with tempfile.TemporaryDirectory(prefix="distance-rs-route-whitebox-") as tmp_name:
-        tmp = Path(tmp_name)
-        source_path = tmp / "source.dep"
-        cost_path = tmp / "cost.dep"
-        dest_path = tmp / "destination.dep"
-        accum_path = tmp / "accum.dep"
-        backlink_path = tmp / "backlink.dep"
-        pathway_path = tmp / "pathway.dep"
-
-        valid_cost = np.isfinite(case.cost) & ~case.barriers
-        source = np.full(case.sources.shape, WHITEBOX_NODATA, dtype=np.float64)
-        source[(case.sources != 0.0) & np.isfinite(case.sources) & valid_cost] = 1.0
-        cost = np.where(valid_cost, np.maximum(case.cost, MIN_COST), WHITEBOX_NODATA)
-        destination_raster = np.zeros(case.cost.shape, dtype=np.float64)
-        destination_raster[destination] = 1.0
-
-        write_whitebox_raster(source_path, source, cell_size=case.cell_size, nodata=WHITEBOX_NODATA)
-        write_whitebox_raster(cost_path, cost, cell_size=case.cell_size, nodata=WHITEBOX_NODATA)
-        write_whitebox_raster(
-            dest_path,
-            destination_raster,
-            cell_size=case.cell_size,
-            nodata=WHITEBOX_NODATA,
-        )
-
-        wbt = whitebox.WhiteboxTools()
-        wbt.set_working_dir(str(tmp))
-        if hasattr(wbt, "set_verbose_mode"):
-            wbt.set_verbose_mode(False)
-
-        start = time.perf_counter()
-        exit_code = wbt.cost_distance(
-            source_path.name,
-            cost_path.name,
-            accum_path.name,
-            backlink_path.name,
-            callback=lambda _message: None,
-        )
-        if exit_code not in (0, None):
-            raise RuntimeError(f"Whitebox CostDistance failed with exit code {exit_code}")
-        exit_code = wbt.cost_pathway(
-            dest_path.name,
-            backlink_path.name,
-            pathway_path.name,
-            zero_background=True,
-            callback=lambda _message: None,
-        )
-        if exit_code not in (0, None):
-            raise RuntimeError(f"Whitebox CostPathway failed with exit code {exit_code}")
-        elapsed = time.perf_counter() - start
-
-        distance = read_whitebox_raster(accum_path, nodata_as_inf=True)
-        pathway = read_whitebox_raster(pathway_path, nodata_as_inf=False)
-        path_mask = np.isfinite(pathway) & (pathway > 0.0)
+    destination_raster = np.zeros(case.cost.shape, dtype=np.float64)
+    destination_raster[destination] = 1.0
+    start = time.perf_counter()
+    result = whitebox_cost_distance(
+        case.sources,
+        cost_surface=case.cost,
+        barriers=case.barriers,
+        cell_size=case.cell_size,
+        destinations=destination_raster,
+    )
+    elapsed = time.perf_counter() - start
+    path_mask = (
+        np.isfinite(result.pathway) & (result.pathway > 0.0)
+        if result.pathway is not None
+        else np.zeros_like(case.barriers)
+    )
+    line_xy = trace_path_mask(
+        path_mask,
+        case_source_cell(case),
+        destination,
+        cell_size=case.cell_size,
+        origin=origin_for_case(case),
+    )
 
     return RouteResult(
         solver="whitebox_cost_distance",
-        distance=distance,
+        distance=result.distance,
         elapsed_sec=elapsed,
-        destination_cost=float(distance[destination]),
+        destination_cost=float(result.distance[destination]),
         path_mask=path_mask,
+        reference_metrics=reference_metrics(case, destination, line_xy),
     )
 
 
@@ -604,10 +568,40 @@ def origin_for_case(case: CaseData) -> tuple[float, float]:
     return 0.0, -(rows // 2) * cell_size_y
 
 
+def case_source_cell(case: CaseData) -> tuple[int, int]:
+    source_cells_arr = np.argwhere((case.sources != 0.0) & np.isfinite(case.sources))
+    if len(source_cells_arr) == 0:
+        raise ValueError("case has no source cell")
+    row, col = source_cells_arr[0]
+    return int(row), int(col)
+
+
 def cell_to_xy(case: CaseData, row: int, col: int) -> tuple[float, float]:
     cell_size_x, cell_size_y = normalize_cell_size(case.cell_size)
     origin_x, origin_y = origin_for_case(case)
     return origin_x + col * cell_size_x, origin_y + row * cell_size_y
+
+
+def reference_metrics(
+    case: CaseData,
+    destination: tuple[int, int],
+    line_xy: npt.NDArray[np.float64],
+) -> PathCostMetrics | None:
+    if len(line_xy) == 0:
+        return None
+    source = case_source_cell(case)
+    return path_cost_metrics(
+        RasterSurface(
+            case.cost,
+            grid=RasterGrid(cell_size=case.cell_size, origin=origin_for_case(case)),
+            elevation=case.elevation,
+            barriers=case.barriers,
+        ),
+        line_xy,
+        vertical_factor=case.vertical_factor,
+        source_xy=cell_to_xy(case, *source),
+        destination_xy=cell_to_xy(case, *destination),
+    )
 
 
 def write_metadata(
@@ -646,6 +640,13 @@ def write_metadata(
                 "status": result.status,
                 "elapsed_sec": result.elapsed_sec,
                 "destination_cost": result.destination_cost,
+                "distance_rs_surface": None
+                if result.reference_metrics is None
+                else {
+                    "cost": result.reference_metrics.cost,
+                    "time_hours": result.reference_metrics.time_hours,
+                    "distance": result.reference_metrics.distance,
+                },
                 "path_vertices": None if result.line_xy is None else int(len(result.line_xy)),
                 "path_cells": None
                 if result.path_mask is None
@@ -665,12 +666,22 @@ def print_summary(
     route_plot: Path,
     accumulation_plot: Path,
 ) -> None:
-    print("\nsolver                 status      seconds     destination_cost")
-    print("---------------------  ----------  ----------  ----------------")
+    print(
+        "\nsolver                 status      seconds     destination_cost  "
+        "rs_cost     rs_time_min  rs_distance"
+    )
+    print(
+        "---------------------  ----------  ----------  ----------------  "
+        "----------  -----------  -----------"
+    )
     for result in results:
+        ref = result.reference_metrics
         print(
             f"{result.solver:21}  {result.status:10}  "
-            f"{format_metric(result.elapsed_sec):>10}  {format_metric(result.destination_cost):>16}"
+            f"{format_metric(result.elapsed_sec):>10}  {format_metric(result.destination_cost):>16}  "
+            f"{format_optional_metric(None if ref is None else ref.cost):>10}  "
+            f"{format_optional_metric(None if ref is None else ref.time_hours * 60.0):>11}  "
+            f"{format_optional_metric(None if ref is None else ref.distance):>11}"
         )
     print(f"\nroute overlay: {route_plot}")
     print(f"accumulation panels: {accumulation_plot}")
@@ -685,6 +696,10 @@ def format_metric(value: float) -> str:
     if abs(value) >= 1000.0 or (abs(value) < 0.001 and value != 0.0):
         return f"{value:.3e}"
     return f"{value:.3f}"
+
+
+def format_optional_metric(value: float | None) -> str:
+    return "n/a" if value is None else format_metric(value)
 
 
 if __name__ == "__main__":

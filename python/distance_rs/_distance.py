@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -11,14 +11,19 @@ from . import _native
 
 
 Cell = tuple[int, int]
+ProgressCallback = Callable[[int, int], None]
+ProgressOption = bool | ProgressCallback | None
 
 __all__ = [
     "DistanceAccumulationResult",
+    "evaluate_path_cost",
     "RasterGrid",
     "RasterSurface",
+    "PathTraceResult",
     "VerticalFactor",
     "distance_accumulation",
     "optimal_path_as_line",
+    "optimal_path_trace",
 ]
 
 
@@ -308,6 +313,14 @@ class RasterSurface:
 
 
 @dataclass
+class PathTraceResult:
+    """Path trace line plus fallback counters collected by the native tracer."""
+
+    line: npt.NDArray[np.float64]
+    metadata: dict[str, int]
+
+
+@dataclass
 class DistanceAccumulationResult:
     distance: npt.NDArray[np.float64]
     _valid: npt.NDArray[np.bool_] = field(repr=False)
@@ -327,6 +340,14 @@ class DistanceAccumulationResult:
     ) -> npt.NDArray[np.float64] | list[npt.NDArray[np.float64]]:
         return optimal_path_as_line(self, destination, max_steps=max_steps)
 
+    def optimal_path_trace(
+        self,
+        destination: tuple[int, int] | Sequence[tuple[int, int]],
+        *,
+        max_steps: int | None = None,
+    ) -> PathTraceResult | list[PathTraceResult]:
+        return optimal_path_trace(self, destination, max_steps=max_steps)
+
 
 def distance_accumulation(
     surface: RasterSurface | npt.ArrayLike,
@@ -334,6 +355,8 @@ def distance_accumulation(
     *,
     target: Cell | Sequence[Cell] | npt.ArrayLike | None = None,
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
+    progress: ProgressOption = True,
+    progress_interval: int | None = None,
 ) -> DistanceAccumulationResult:
     """Compute accumulated cost distance from one or more source cells.
 
@@ -343,6 +366,9 @@ def distance_accumulation(
     useful for accumulation/allocation workflows without exposing source rasters.
     When `target` is supplied, cells not needed to settle the requested target
     cell(s) may remain infinite in the returned distance raster.
+
+    Set `progress=True` to show a `tqdm` progress bar, or pass a callback that
+    accepts `(accepted_cells, total_valid_cells)`.
     """
 
     if not isinstance(surface, RasterSurface):
@@ -362,17 +388,32 @@ def distance_accumulation(
     cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
     vf = VerticalFactor.from_any(vertical_factor)
     origin_x, origin_y = _normalize_origin(surface.grid.origin)
-
-    raw = _native.distance_accumulation(
-        source_cells,
-        cost_arr,
-        elevation_arr,
-        barrier_arr,
-        vf.as_native(),
-        cell_size_x,
-        cell_size_y,
-        target_cells,
+    callback, close_progress = _normalize_progress_callback(
+        progress,
+        total=None if target_cells is not None else int(np.count_nonzero(valid_arr)),
+        label="distance_accumulation",
     )
+    progress_interval_value = _normalize_progress_interval(
+        progress_interval,
+        int(np.count_nonzero(valid_arr)),
+    )
+
+    try:
+        raw = _native.distance_accumulation(
+            source_cells,
+            cost_arr,
+            elevation_arr,
+            barrier_arr,
+            vf.as_native(),
+            cell_size_x,
+            cell_size_y,
+            target_cells,
+            callback,
+            progress_interval_value,
+        )
+    finally:
+        if close_progress is not None:
+            close_progress()
 
     return DistanceAccumulationResult(
         distance=raw["distance"],
@@ -385,6 +426,97 @@ def distance_accumulation(
         origin=(origin_x, origin_y),
         vertical_factor=vf,
     )
+
+
+def evaluate_path_cost(
+    surface: RasterSurface | npt.ArrayLike,
+    line_xy: Any,
+    *,
+    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
+    max_step: float | None = None,
+) -> float:
+    """Evaluate a directional x/y path against a distance-rs raster surface.
+
+    The line is evaluated in the order supplied. Each segment is charged with
+    the same local rule used by the solver for point-to-point movement:
+    surface distance times the destination cell's cost times the vertical
+    factor. Dijkstra traces from `trace_raster_path` are destination-to-source,
+    so reverse them before evaluating source-to-destination travel.
+
+    `line_xy` may be an ``(n, 2)`` coordinate array, a GeoJSON-like LineString
+    mapping, or an object with a Shapely-style ``.coords`` attribute. Coordinates
+    must use the solver x/y grid for the supplied `RasterSurface`.
+    """
+
+    if not isinstance(surface, RasterSurface):
+        surface = RasterSurface(surface)
+
+    cost_arr = np.ascontiguousarray(np.asarray(surface.cost, dtype=np.float64))
+    if cost_arr.ndim != 2:
+        raise ValueError("surface cost must be a 2D array")
+
+    elevation_arr = _optional_surface_array(surface.elevation, cost_arr.shape, "elevation")
+    barrier_arr = _optional_barrier_array(surface.barriers, cost_arr.shape)
+    valid_arr = _valid_surface_mask(cost_arr, elevation_arr, barrier_arr)
+    cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
+    origin_x, origin_y = _normalize_origin(surface.grid.origin)
+    vf = VerticalFactor.from_any(vertical_factor)
+    line = _normalize_line_xy(line_xy)
+    step_limit = _normalize_max_step(max_step)
+
+    total = 0.0
+    for start_xy, end_xy in zip(line[:-1], line[1:]):
+        total += _evaluate_path_segment(
+            start_xy,
+            end_xy,
+            cost=cost_arr,
+            elevation=elevation_arr,
+            valid=valid_arr,
+            vertical_factor=vf,
+            cell_size_x=cell_size_x,
+            cell_size_y=cell_size_y,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            max_step=step_limit,
+        )
+        if not math.isfinite(total):
+            return math.inf
+    return float(total)
+
+
+def _normalize_progress_callback(
+    progress: ProgressOption,
+    *,
+    total: int | None,
+    label: str,
+) -> tuple[ProgressCallback | None, Callable[[], None] | None]:
+    if progress is None or progress is False:
+        return None, None
+    if progress is True:
+        from tqdm.auto import tqdm
+
+        bar = tqdm(total=total, desc=label, unit="cell")
+        last_accepted = 0
+
+        def callback(accepted: int, _total: int) -> None:
+            nonlocal last_accepted
+            if accepted > last_accepted:
+                bar.update(accepted - last_accepted)
+                last_accepted = accepted
+
+        return callback, bar.close
+    if callable(progress):
+        return progress, None
+    raise TypeError("progress must be a bool, a callback, or None")
+
+
+def _normalize_progress_interval(value: int | None, total: int) -> int:
+    if value is None:
+        return max(1, total // 200)
+    interval = int(value)
+    if interval < 1:
+        raise ValueError("progress_interval must be at least 1")
+    return interval
 
 
 def _optional_surface_array(
@@ -471,6 +603,145 @@ def _valid_surface_mask(
     return np.ascontiguousarray(valid, dtype=np.bool_)
 
 
+def _normalize_line_xy(line_xy: Any) -> npt.NDArray[np.float64]:
+    if isinstance(line_xy, Mapping):
+        if line_xy.get("type") != "LineString":
+            raise ValueError("line_xy mapping must be a GeoJSON-like LineString")
+        value = line_xy.get("coordinates")
+    elif hasattr(line_xy, "coords"):
+        value = line_xy.coords
+    else:
+        value = line_xy
+
+    line = np.asarray(value, dtype=np.float64)
+    if line.ndim != 2 or line.shape[1] != 2:
+        raise ValueError("line_xy must have shape (n, 2)")
+    if len(line) == 0:
+        raise ValueError("line_xy must contain at least one point")
+    if not np.all(np.isfinite(line)):
+        raise ValueError("line_xy coordinates must be finite")
+    return np.ascontiguousarray(line, dtype=np.float64)
+
+
+def _normalize_max_step(max_step: float | None) -> float | None:
+    if max_step is None:
+        return None
+    value = float(max_step)
+    if value <= 0.0 or not math.isfinite(value):
+        raise ValueError("max_step must be a positive finite value")
+    return value
+
+
+def _evaluate_path_segment(
+    start_xy: npt.NDArray[np.float64],
+    end_xy: npt.NDArray[np.float64],
+    *,
+    cost: npt.NDArray[np.float64],
+    elevation: npt.NDArray[np.float64] | None,
+    valid: npt.NDArray[np.bool_],
+    vertical_factor: VerticalFactor,
+    cell_size_x: float,
+    cell_size_y: float,
+    origin_x: float,
+    origin_y: float,
+    max_step: float | None,
+) -> float:
+    delta = end_xy - start_xy
+    plan_distance = float(math.hypot(float(delta[0]), float(delta[1])))
+    if plan_distance <= 0.0:
+        return 0.0
+
+    steps = 1 if max_step is None else max(1, math.ceil(plan_distance / max_step))
+    previous = start_xy
+    subtotal = 0.0
+    for step in range(1, steps + 1):
+        current = start_xy + delta * (step / steps)
+        subtotal += _evaluate_path_step(
+            previous,
+            current,
+            cost=cost,
+            elevation=elevation,
+            valid=valid,
+            vertical_factor=vertical_factor,
+            cell_size_x=cell_size_x,
+            cell_size_y=cell_size_y,
+            origin_x=origin_x,
+            origin_y=origin_y,
+        )
+        if not math.isfinite(subtotal):
+            return math.inf
+        previous = current
+    return subtotal
+
+
+def _evaluate_path_step(
+    start_xy: npt.NDArray[np.float64],
+    end_xy: npt.NDArray[np.float64],
+    *,
+    cost: npt.NDArray[np.float64],
+    elevation: npt.NDArray[np.float64] | None,
+    valid: npt.NDArray[np.bool_],
+    vertical_factor: VerticalFactor,
+    cell_size_x: float,
+    cell_size_y: float,
+    origin_x: float,
+    origin_y: float,
+) -> float:
+    start_cell = _line_point_cell(
+        start_xy,
+        shape=cost.shape,
+        cell_size_x=cell_size_x,
+        cell_size_y=cell_size_y,
+        origin_x=origin_x,
+        origin_y=origin_y,
+    )
+    end_cell = _line_point_cell(
+        end_xy,
+        shape=cost.shape,
+        cell_size_x=cell_size_x,
+        cell_size_y=cell_size_y,
+        origin_x=origin_x,
+        origin_y=origin_y,
+    )
+    if start_cell is None or end_cell is None:
+        return math.inf
+    if not valid[start_cell] or not valid[end_cell]:
+        return math.inf
+
+    dx = float(end_xy[0] - start_xy[0])
+    dy = float(end_xy[1] - start_xy[1])
+    plan_distance = math.hypot(dx, dy)
+    if plan_distance <= 0.0:
+        return 0.0
+
+    dz = 0.0
+    if elevation is not None:
+        dz = float(elevation[end_cell] - elevation[start_cell])
+    factor = vertical_factor.factor(math.degrees(math.atan2(dz, plan_distance)))
+    if not math.isfinite(factor):
+        return math.inf
+
+    surface_distance = math.hypot(plan_distance, dz) if elevation is not None else plan_distance
+    return surface_distance * float(cost[end_cell]) * factor
+
+
+def _line_point_cell(
+    xy: npt.NDArray[np.float64],
+    *,
+    shape: tuple[int, int],
+    cell_size_x: float,
+    cell_size_y: float,
+    origin_x: float,
+    origin_y: float,
+) -> tuple[int, int] | None:
+    col = math.floor((float(xy[0]) - origin_x) / cell_size_x + 0.5)
+    row = math.floor((float(xy[1]) - origin_y) / cell_size_y + 0.5)
+    rows, cols = shape
+    if row < 0 or col < 0 or row >= rows or col >= cols:
+        return None
+    return int(row), int(col)
+
+
 def optimal_path_as_line(
     result: DistanceAccumulationResult,
     destination: tuple[int, int] | Sequence[tuple[int, int]],
@@ -503,6 +774,56 @@ def optimal_path_as_line(
 
     return [
         optimal_path_as_line(result, one_destination, max_steps=max_steps)
+        for one_destination in destination  # type: ignore[union-attr]
+    ]
+
+
+def optimal_path_trace(
+    result: DistanceAccumulationResult,
+    destination: tuple[int, int] | Sequence[tuple[int, int]],
+    *,
+    max_steps: int | None = None,
+) -> PathTraceResult | list[PathTraceResult]:
+    """Trace one or more paths and return fallback counters from the native tracer.
+
+    Metadata keys:
+    - `direction_steps`: ordinary back-direction lattice steps.
+    - `parent_lattice_fallbacks`: steps that used the stored parent direction.
+    - `proposed_cell_center_fallbacks`: accepted by snapping to the proposed cell center.
+    - `current_cell_center_fallbacks`: accepted by recentering inside the current cell.
+    - `direct_parent_point_fallbacks`: accepted by moving directly to the stored parent point.
+    - `non_descending_rejections`: candidate steps rejected because they did not reduce distance.
+    - `total_fallbacks`: sum of the fallback counters.
+    """
+
+    if not isinstance(result, DistanceAccumulationResult):
+        raise TypeError("result must be a DistanceAccumulationResult")
+
+    if _is_one_destination(destination):
+        row, col = destination  # type: ignore[misc]
+        max_steps_value = _normalize_max_steps(max_steps)
+        raw = _native.optimal_path_trace(
+            result.distance,
+            result._valid,
+            result._back_direction,
+            result._parent_a,
+            result._parent_b,
+            result._parent_weight,
+            int(row),
+            int(col),
+            result.cell_size[0],
+            result.cell_size[1],
+            result.origin[0],
+            result.origin[1],
+            max_steps_value,
+        )
+        return PathTraceResult(
+            line=raw["line"],
+            metadata={key: int(value) for key, value in raw["metadata"].items()},
+        )
+
+    return [
+        optimal_path_trace(result, one_destination, max_steps=max_steps)
         for one_destination in destination  # type: ignore[union-attr]
     ]
 

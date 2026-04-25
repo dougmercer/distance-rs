@@ -13,6 +13,7 @@ from shapely.geometry import LineString, Polygon
 
 from distance_rs import (
     CostRaster,
+    evaluate_path_cost,
     GeoBarriers,
     GeoPoints,
     GridSpec,
@@ -99,6 +100,22 @@ def test_load_surface_aligns_geotiffs_and_cost_classes(tmp_path: Path) -> None:
 
     line_map_xy = geo.grid.raster_line_to_xy(np.array([[0.0, 0.0], [30.0, 30.0]]))
     assert np.allclose(line_map_xy, np.array([[5.0, 35.0], [35.0, 5.0]]))
+    assert np.allclose(geo.grid.xy_line_to_raster(line_map_xy), [[0.0, 0.0], [30.0, 30.0]])
+
+
+def test_evaluate_geo_path_cost_uses_projected_line_coordinates(tmp_path: Path) -> None:
+    cost_path = tmp_path / "cost.tif"
+    _write_geotiff(
+        cost_path,
+        np.array([[1.0, 9.0, 1.0]], dtype=np.float32),
+        transform=from_origin(0.0, 10.0, 10.0, 10.0),
+        crs="EPSG:3857",
+    )
+    geo = load_surface(cost_path)
+
+    line = LineString([(5.0, 5.0), (15.0, 5.0)])
+
+    assert evaluate_path_cost(geo, line) == pytest.approx(90.0)
 
 
 def test_load_points_reprojects_gpkg_waypoints(tmp_path: Path) -> None:

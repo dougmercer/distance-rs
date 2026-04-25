@@ -15,7 +15,6 @@ import math
 import platform
 import statistics
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,14 +30,11 @@ from distance_rs import (
     distance_accumulation,
 )
 from distance_rs.baselines import (
-    MIN_COST,
-    WHITEBOX_NODATA,
     compare_distances,
     euclidean_distance_to_sources,
     json_safe,
-    raster_dijkstra_baseline,
-    read_whitebox_raster,
-    write_whitebox_raster,
+    raster_dijkstra,
+    whitebox_cost_distance,
 )
 
 
@@ -102,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         source=source_cells(case.sources),
                         vertical_factor=case.vertical_factor,
+                        progress=args.progress,
                     ).distance
                 ),
                 repeats=args.repeats,
@@ -111,14 +108,15 @@ def main(argv: list[str] | None = None) -> int:
             baselines: dict[str, dict[str, Any]] = {}
             if RASTER_BASELINE in baseline_names:
                 baseline = time_call(
-                    lambda: raster_dijkstra_baseline(
+                    lambda: raster_dijkstra(
                         case.sources,
                         cost_surface=case.cost,
                         elevation=case.elevation,
                         barriers=case.barriers,
                         vertical_factor=case.vertical_factor,
                         cell_size=case.cell_size,
-                    ),
+                        progress=args.progress,
+                    ).distance,
                     repeats=args.repeats,
                     warmups=args.warmups,
                 )
@@ -193,6 +191,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--repeats", type=int, default=3, help="Timed repeats per solver.")
     parser.add_argument("--warmups", type=int, default=1, help="Untimed warmup runs per solver.")
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show tqdm progress bars for solvers that report accepted cells.",
+    )
     parser.add_argument(
         "--baselines",
         nargs="+",
@@ -356,45 +359,12 @@ def whitebox_comparable(case: CaseData) -> tuple[bool, str | None]:
 
 
 def whitebox_cost_distance_baseline(case: CaseData) -> npt.NDArray[np.float64]:
-    try:
-        import whitebox
-    except ImportError as exc:
-        raise RuntimeError(
-            "Whitebox baseline requested but the 'whitebox' package is not installed. "
-            "Run 'uv sync --group whitebox' or use "
-            "'uv run --with whitebox python benchmarks/baseline.py --baselines whitebox ...'."
-        ) from exc
-
-    with tempfile.TemporaryDirectory(prefix="distance-rs-whitebox-") as tmp_name:
-        tmp = Path(tmp_name)
-        source_path = tmp / "source.dep"
-        cost_path = tmp / "cost.dep"
-        accum_path = tmp / "accum.dep"
-        backlink_path = tmp / "backlink.dep"
-
-        valid_cost = np.isfinite(case.cost) & ~case.barriers
-        source = np.full(case.sources.shape, WHITEBOX_NODATA, dtype=np.float64)
-        source[(case.sources != 0.0) & np.isfinite(case.sources) & valid_cost] = 1.0
-        cost = np.where(valid_cost, np.maximum(case.cost, MIN_COST), WHITEBOX_NODATA)
-
-        write_whitebox_raster(source_path, source, cell_size=case.cell_size, nodata=WHITEBOX_NODATA)
-        write_whitebox_raster(cost_path, cost, cell_size=case.cell_size, nodata=WHITEBOX_NODATA)
-
-        wbt = whitebox.WhiteboxTools()
-        wbt.set_working_dir(str(tmp))
-        if hasattr(wbt, "set_verbose_mode"):
-            wbt.set_verbose_mode(False)
-        exit_code = wbt.cost_distance(
-            source_path.name,
-            cost_path.name,
-            accum_path.name,
-            backlink_path.name,
-            callback=lambda _message: None,
-        )
-        if exit_code not in (0, None):
-            raise RuntimeError(f"Whitebox CostDistance failed with exit code {exit_code}")
-
-        return read_whitebox_raster(accum_path, nodata_as_inf=True)
+    return whitebox_cost_distance(
+        case.sources,
+        cost_surface=case.cost,
+        barriers=case.barriers,
+        cell_size=case.cell_size,
+    ).distance
 
 
 def time_call(fn: Callable[[], Any], *, repeats: int, warmups: int) -> TimedResult:

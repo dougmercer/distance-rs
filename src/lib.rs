@@ -84,7 +84,7 @@ mod tests {
             cell_size_y: 1.0,
         });
 
-        let output = solver.solve(&[2 * cols + 1], None).unwrap();
+        let output = solver.solve(&[2 * cols + 1], None, None, 1).unwrap();
 
         assert!(output.distance[2 * cols + 5] > 500.0);
     }
@@ -115,7 +115,7 @@ mod tests {
             cell_size_x: 1.0,
             cell_size_y: 1.0,
         })
-        .solve(&[4 * cols + 4], None)
+        .solve(&[4 * cols + 4], None, None, 1)
         .unwrap();
 
         let binary = Solver::new(SolverInput {
@@ -140,7 +140,7 @@ mod tests {
             cell_size_x: 1.0,
             cell_size_y: 1.0,
         })
-        .solve(&[4 * cols + 4], None)
+        .solve(&[4 * cols + 4], None, None, 1)
         .unwrap();
 
         for (scaled, base) in binary.distance.iter().zip(base.distance.iter()) {

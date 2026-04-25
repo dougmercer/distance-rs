@@ -10,9 +10,15 @@ from distance_rs import (
     RasterSurface,
     VerticalFactor,
     distance_accumulation,
+    evaluate_path_cost,
     optimal_path_as_line,
+    optimal_path_trace,
 )
-from distance_rs.baselines import raster_dijkstra, raster_dijkstra_baseline, trace_raster_path
+from distance_rs.baselines import (
+    raster_dijkstra,
+    trace_raster_path,
+    whitebox_cost_distance,
+)
 
 
 def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
@@ -74,6 +80,37 @@ def test_elevation_uses_surface_distance() -> None:
     assert result.distance[1, 2] == np.float64(math.hypot(1.0, 3.0))
 
 
+def test_evaluate_path_cost_uses_distance_rs_target_cell_cost() -> None:
+    cost = np.array([[1.0, 9.0, 1.0]], dtype=float)
+    line = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+
+    assert evaluate_path_cost(cost, line) == pytest.approx(9.0)
+
+
+def test_evaluate_path_cost_matches_adjacent_elevation_step() -> None:
+    cost = np.ones((3, 3), dtype=float)
+    elevation = np.zeros((3, 3), dtype=float)
+    elevation[1, 2] = 3.0
+    surface = RasterSurface(cost, elevation=elevation)
+    source = (1, 1)
+    target = (1, 2)
+    line = np.array([[1.0, 1.0], [2.0, 1.0]], dtype=float)
+
+    result = distance_accumulation(surface, source=source)
+
+    assert evaluate_path_cost(surface, line) == pytest.approx(result.distance[target])
+
+
+def test_evaluate_path_cost_returns_infinite_for_blocked_step() -> None:
+    cost = np.ones((3, 3), dtype=float)
+    barriers = np.zeros((3, 3), dtype=bool)
+    barriers[1, 2] = True
+    surface = RasterSurface(cost, barriers=barriers)
+    line = np.array([[1.0, 1.0], [2.0, 1.0]], dtype=float)
+
+    assert math.isinf(evaluate_path_cost(surface, line))
+
+
 def test_distance_accumulation_rejects_non_finite_numeric_options() -> None:
     cost = np.ones((3, 3), dtype=float)
 
@@ -96,6 +133,23 @@ def test_distance_accumulation_rejects_non_finite_numeric_options() -> None:
 def test_distance_accumulation_rejects_non_integer_source_cell() -> None:
     with pytest.raises(ValueError, match="integer"):
         distance_accumulation(np.ones((3, 3), dtype=float), source=(1.2, 1))
+
+
+def test_distance_accumulation_reports_progress() -> None:
+    updates: list[tuple[int, int]] = []
+
+    result = distance_accumulation(
+        np.ones((5, 5), dtype=float),
+        source=(2, 2),
+        progress=lambda accepted, total: updates.append((accepted, total)),
+        progress_interval=4,
+    )
+
+    assert np.isfinite(result.distance).all()
+    assert updates[-1] == (25, 25)
+    assert [accepted for accepted, _total in updates] == sorted(
+        accepted for accepted, _total in updates
+    )
 
 
 def test_optimal_path_as_line_reaches_source() -> None:
@@ -185,10 +239,13 @@ def test_unrelated_barrier_does_not_replace_surface_back_direction() -> None:
 
     result = distance_accumulation(RasterSurface(cost, barriers=barriers), source=source)
 
-    assert _angle_delta(
-        result._back_direction[destination],
-        expected._back_direction[destination],
-    ) < 0.01
+    assert (
+        _angle_delta(
+            result._back_direction[destination],
+            expected._back_direction[destination],
+        )
+        < 0.01
+    )
 
 
 def test_optimal_path_as_line_repairs_invalid_direction_step_locally() -> None:
@@ -210,7 +267,32 @@ def test_optimal_path_as_line_repairs_invalid_direction_step_locally() -> None:
     assert _polyline_length(line) < 520.0
 
 
-def test_raster_dijkstra_baseline_returns_distance_and_traceable_parent() -> None:
+def test_optimal_path_trace_reports_fallback_metadata() -> None:
+    source, destination, cost, barriers = _make_maze_case(
+        maze_rows=11,
+        maze_cols=17,
+        scale=7,
+        seed=11,
+    )
+    result = distance_accumulation(
+        RasterSurface(cost, barriers=barriers),
+        source=source,
+    )
+
+    trace = optimal_path_trace(result, destination)
+
+    assert trace.line.shape[1] == 2
+    assert trace.metadata["direction_steps"] > 0
+    assert trace.metadata["parent_lattice_fallbacks"] > 0
+    assert trace.metadata["total_fallbacks"] == (
+        trace.metadata["parent_lattice_fallbacks"]
+        + trace.metadata["proposed_cell_center_fallbacks"]
+        + trace.metadata["current_cell_center_fallbacks"]
+        + trace.metadata["direct_parent_point_fallbacks"]
+    )
+
+
+def test_raster_dijkstra_returns_distance_and_traceable_parent() -> None:
     sources = np.zeros((9, 9), dtype=bool)
     sources[4, 1] = True
     barriers = np.zeros((9, 9), dtype=bool)
@@ -218,14 +300,50 @@ def test_raster_dijkstra_baseline_returns_distance_and_traceable_parent() -> Non
     barriers[4, 4] = False
 
     result = raster_dijkstra(sources, barriers=barriers)
-    distance_only = raster_dijkstra_baseline(sources, barriers=barriers)
     line = trace_raster_path(result.parent, (4, 7))
 
-    assert np.array_equal(result.distance, distance_only)
     assert math.isinf(result.distance[0, 4])
     assert np.isfinite(result.distance[4, 7])
     assert np.allclose(line[0], [7.0, 4.0])
     assert np.allclose(line[-1], [1.0, 4.0])
+
+
+def test_raster_dijkstra_reports_progress() -> None:
+    sources = np.zeros((5, 5), dtype=bool)
+    sources[2, 2] = True
+    updates: list[tuple[int, int]] = []
+
+    result = raster_dijkstra(
+        sources,
+        progress=lambda accepted, total: updates.append((accepted, total)),
+        progress_interval=4,
+    )
+
+    assert np.isfinite(result.distance).all()
+    assert updates[-1] == (25, 25)
+    assert [accepted for accepted, _total in updates] == sorted(
+        accepted for accepted, _total in updates
+    )
+
+
+def test_whitebox_cost_distance_burns_barriers_into_cost_raster() -> None:
+    pytest.importorskip("whitebox")
+
+    sources = np.zeros((9, 9), dtype=float)
+    sources[4, 1] = 1.0
+    barriers = np.zeros((9, 9), dtype=bool)
+    barriers[:, 4] = True
+    barriers[4, 4] = False
+
+    result = whitebox_cost_distance(
+        sources,
+        barriers=barriers,
+        destinations=np.eye(9, dtype=float),
+    )
+
+    assert math.isinf(result.distance[0, 4])
+    assert np.isfinite(result.distance[4, 7])
+    assert result.pathway is not None
 
 
 def _path_area_from_straight_line(

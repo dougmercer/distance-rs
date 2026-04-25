@@ -29,10 +29,16 @@ from distance_rs import (
     GridSpec,
     OptimalPathResult,
     PathMetrics,
+    evaluate_path_cost,
     load_surface,
     route_path,
 )
-from distance_rs.baselines import raster_dijkstra, trace_raster_path
+from distance_rs.baselines import (
+    raster_dijkstra,
+    trace_path_mask,
+    trace_raster_path,
+    whitebox_cost_distance,
+)
 
 
 CRS = "EPSG:32618"
@@ -74,27 +80,37 @@ class BaselineLeg:
         self,
         *,
         index: int,
+        solver: str,
         path_xy: npt.NDArray[np.float64],
         cost: float,
         metrics: PathMetrics,
+        reference_metrics: PathMetrics | None = None,
+        mask_xy: npt.NDArray[np.float64] | None = None,
     ) -> None:
         self.index = index
+        self.solver = solver
         self.path_xy = path_xy
         self.cost = cost
         self.metrics = metrics
+        self.reference_metrics = reference_metrics
+        self.mask_xy = mask_xy
 
 
 class BaselineRoute:
     def __init__(
         self,
         *,
+        solver: str,
         path_xy: npt.NDArray[np.float64],
         legs: tuple[BaselineLeg, ...],
         metrics: PathMetrics,
+        reference_metrics: PathMetrics | None = None,
     ) -> None:
+        self.solver = solver
         self.path_xy = path_xy
         self.legs = legs
         self.metrics = metrics
+        self.reference_metrics = reference_metrics
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -138,11 +154,20 @@ def main(argv: list[str] | None = None) -> None:
         crop_buffer=args.crop_buffer,
         baseline_speed=args.baseline_speed,
     )
+    whitebox_route = run_whitebox_route(
+        land_use_path,
+        elevation_path=elevation_path,
+        waypoints=waypoints,
+        barriers=barriers,
+        crop_buffer=args.crop_buffer,
+        baseline_speed=args.baseline_speed,
+    )
 
     write_route_geojson(
         route_geojson_path,
         route,
         dijkstra_route=dijkstra_route,
+        whitebox_route=whitebox_route,
         barriers=barriers,
     )
     plot_route_map(
@@ -151,6 +176,7 @@ def main(argv: list[str] | None = None) -> None:
         elevation_path=elevation_path,
         ordered_route=route,
         dijkstra_route=dijkstra_route,
+        whitebox_route=whitebox_route,
         barriers=barriers,
         max_plot_pixels=args.max_plot_pixels,
     )
@@ -158,6 +184,7 @@ def main(argv: list[str] | None = None) -> None:
         summary_path,
         route,
         dijkstra_route=dijkstra_route,
+        whitebox_route=whitebox_route,
         land_use_path=land_use_path,
         elevation_path=elevation_path,
         size=args.size,
@@ -169,6 +196,7 @@ def main(argv: list[str] | None = None) -> None:
     print_summary(
         route,
         dijkstra_route=dijkstra_route,
+        whitebox_route=whitebox_route,
         route_geojson_path=route_geojson_path,
         summary_path=summary_path,
         plot_path=plot_path,
@@ -204,7 +232,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--crop-buffer",
         type=float,
-        default=30.0,
+        default=180.0,
         help="GeoTIFF corridor buffer around each route leg in meters.",
     )
     parser.add_argument(
@@ -540,6 +568,7 @@ def run_raster_dijkstra_route(
     legs: list[BaselineLeg] = []
     path_parts: list[npt.NDArray[np.float64]] = []
     total_metrics: PathMetrics | None = None
+    total_reference_metrics: PathMetrics | None = None
 
     for index, (start_xy, end_xy) in enumerate(zip(waypoints, waypoints[1:])):
         geo = load_surface(
@@ -570,16 +599,27 @@ def run_raster_dijkstra_route(
         metrics = path_metrics(
             path_xy, cost=destination_cost, geo=geo, baseline_speed=baseline_speed
         )
+        reference_cost = evaluate_path_cost(geo, path_xy, vertical_factor=VERTICAL_FACTOR)
+        reference_metrics = path_metrics(
+            path_xy, cost=reference_cost, geo=geo, baseline_speed=baseline_speed
+        )
         total_metrics = (
             metrics if total_metrics is None else combine_metrics(total_metrics, metrics)
+        )
+        total_reference_metrics = (
+            reference_metrics
+            if total_reference_metrics is None
+            else combine_metrics(total_reference_metrics, reference_metrics)
         )
 
         legs.append(
             BaselineLeg(
                 index=index,
+                solver="raster_dijkstra",
                 path_xy=path_xy,
                 cost=destination_cost,
                 metrics=metrics,
+                reference_metrics=reference_metrics,
             )
         )
         path_parts.append(path_xy if not path_parts else path_xy[1:])
@@ -587,10 +627,128 @@ def run_raster_dijkstra_route(
     if total_metrics is None:
         raise ValueError("baseline route requires at least one leg")
     return BaselineRoute(
+        solver="raster_dijkstra",
         path_xy=np.vstack(path_parts),
         legs=tuple(legs),
         metrics=total_metrics,
+        reference_metrics=total_reference_metrics,
     )
+
+
+def run_whitebox_route(
+    land_use_path: Path,
+    *,
+    elevation_path: Path,
+    waypoints: list[tuple[float, float]],
+    barriers: list[Polygon],
+    crop_buffer: float,
+    baseline_speed: float,
+) -> BaselineRoute:
+    legs: list[BaselineLeg] = []
+    mask_parts: list[npt.NDArray[np.float64]] = []
+    total_cost = 0.0
+    total_reference_metrics: PathMetrics | None = None
+
+    for index, (start_xy, end_xy) in enumerate(zip(waypoints, waypoints[1:])):
+        geo = load_surface(
+            CostRaster(land_use_path, values=LAND_USE_COSTS),
+            elevation=elevation_path,
+            barriers=[GeoBarriers(barrier, crs=CRS) for barrier in barriers],
+            grid=GridSpec(crs=CRS, bounds=leg_bounds(start_xy, end_xy, crop_buffer)),
+        )
+        source_cell = geo.grid.xy_to_cell(*start_xy)
+        destination_cell = geo.grid.xy_to_cell(*end_xy)
+        sources = np.zeros(geo.grid.shape, dtype=np.float64)
+        destinations = np.zeros(geo.grid.shape, dtype=np.float64)
+        sources[source_cell] = 1.0
+        destinations[destination_cell] = 1.0
+        result = whitebox_cost_distance(
+            sources,
+            cost_surface=geo.surface.cost,
+            barriers=geo.surface.barriers,
+            cell_size=geo.grid.cell_size,
+            destinations=destinations,
+        )
+
+        destination_cost = float(result.distance[destination_cell])
+        if not math.isfinite(destination_cost):
+            raise ValueError(f"Whitebox CostDistance could not reach leg {index} destination")
+
+        path_mask = (
+            np.isfinite(result.pathway) & (result.pathway > 0.0)
+            if result.pathway is not None
+            else np.zeros(geo.grid.shape, dtype=bool)
+        )
+        mask_xy = path_mask_to_xy(geo, path_mask)
+        cell_line = trace_path_mask(
+            path_mask,
+            source_cell,
+            destination_cell,
+            cell_size=geo.grid.cell_size,
+        )
+        path_xy = geo.grid.raster_line_to_xy(cell_line) if len(cell_line) else mask_xy
+        reference_metrics = None
+        if len(path_xy) > 0:
+            reference_cost = evaluate_path_cost(geo, path_xy, vertical_factor=VERTICAL_FACTOR)
+            reference_metrics = path_metrics(
+                path_xy, cost=reference_cost, geo=geo, baseline_speed=baseline_speed
+            )
+            total_reference_metrics = (
+                reference_metrics
+                if total_reference_metrics is None
+                else combine_metrics(total_reference_metrics, reference_metrics)
+            )
+        metrics = PathMetrics(
+            cost=destination_cost,
+            distance_m=math.nan,
+            surface_distance_m=math.nan,
+            time_hours=destination_cost / (baseline_speed * 1000.0),
+            average_speed_kmh=math.nan,
+        )
+        total_cost += destination_cost
+        legs.append(
+            BaselineLeg(
+                index=index,
+                solver="whitebox_cost_distance",
+                path_xy=mask_xy,
+                cost=destination_cost,
+                metrics=metrics,
+                reference_metrics=reference_metrics,
+                mask_xy=mask_xy,
+            )
+        )
+        if len(mask_xy) > 0:
+            mask_parts.append(mask_xy)
+
+    if not legs:
+        raise ValueError("baseline route requires at least one leg")
+    total_metrics = PathMetrics(
+        cost=total_cost,
+        distance_m=math.nan,
+        surface_distance_m=math.nan,
+        time_hours=total_cost / (baseline_speed * 1000.0),
+        average_speed_kmh=math.nan,
+    )
+    return BaselineRoute(
+        solver="whitebox_cost_distance",
+        path_xy=np.vstack(mask_parts) if mask_parts else np.empty((0, 2), dtype=np.float64),
+        legs=tuple(legs),
+        metrics=total_metrics,
+        reference_metrics=total_reference_metrics,
+    )
+
+
+def path_mask_to_xy(geo: GeoSurface, path_mask: npt.NDArray[np.bool_]) -> npt.NDArray[np.float64]:
+    rows, cols = np.nonzero(path_mask)
+    if rows.size == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    local_line = np.column_stack(
+        [
+            cols.astype(np.float64) * geo.grid.cell_size[0],
+            rows.astype(np.float64) * geo.grid.cell_size[1],
+        ]
+    )
+    return geo.grid.raster_line_to_xy(local_line)
 
 
 def leg_bounds(start_xy: tuple[float, float], end_xy: tuple[float, float], margin: float) -> Bounds:
@@ -686,6 +844,7 @@ def write_route_geojson(
     route: OptimalPathResult,
     *,
     dijkstra_route: BaselineRoute,
+    whitebox_route: BaselineRoute,
     barriers: list[Polygon],
 ) -> None:
     features: list[dict[str, Any]] = [
@@ -717,6 +876,23 @@ def write_route_geojson(
             "geometry": {
                 "type": "LineString",
                 "coordinates": dijkstra_route.path_xy.tolist(),
+            },
+        }
+    )
+    features.append(
+        {
+            "type": "Feature",
+            "properties": {
+                "kind": "route_mask",
+                "solver": "whitebox_cost_distance",
+                "crs": CRS,
+                "cost": whitebox_route.metrics.cost,
+                "time_hours": whitebox_route.metrics.time_hours,
+                "note": "Whitebox CostPathway returns a raster pathway mask, not an ordered polyline.",
+            },
+            "geometry": {
+                "type": "MultiPoint",
+                "coordinates": whitebox_route.path_xy.tolist(),
             },
         }
     )
@@ -756,6 +932,24 @@ def write_route_geojson(
                 },
             }
         )
+    for leg in whitebox_route.legs:
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {
+                    "kind": "leg_mask",
+                    "solver": leg.solver,
+                    "index": leg.index,
+                    "cost": leg.cost,
+                    "time_hours": leg.metrics.time_hours,
+                    "note": "Whitebox CostPathway returns mask cells for this leg.",
+                },
+                "geometry": {
+                    "type": "MultiPoint",
+                    "coordinates": leg.path_xy.tolist(),
+                },
+            }
+        )
     for index, barrier in enumerate(barriers):
         features.append(
             {
@@ -777,6 +971,7 @@ def plot_route_map(
     elevation_path: Path,
     ordered_route: OptimalPathResult,
     dijkstra_route: BaselineRoute,
+    whitebox_route: BaselineRoute,
     barriers: list[Polygon],
     max_plot_pixels: int,
 ) -> None:
@@ -792,7 +987,7 @@ def plot_route_map(
         ) from exc
 
     plot_bounds = route_plot_bounds(
-        [ordered_route.path_xy, dijkstra_route.path_xy],
+        [ordered_route.path_xy, dijkstra_route.path_xy, whitebox_route.path_xy],
         barriers=barriers,
         margin=160.0,
     )
@@ -848,6 +1043,7 @@ def plot_route_map(
             linewidth=2.1,
             linestyle="--",
         )
+        draw_mask_points(ax, whitebox_route.path_xy, color="#ffcc00", label="Whitebox CostDistance")
         draw_waypoints(ax, ordered_route.waypoint_xy)
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("Easting (m)")
@@ -856,6 +1052,16 @@ def plot_route_map(
     route_handles = [
         Line2D([0], [0], color="#d95f02", lw=2.8, label="Ordered Upwind"),
         Line2D([0], [0], color="#1f78b4", lw=2.1, ls="--", label="Raster Dijkstra"),
+        Line2D(
+            [0],
+            [0],
+            marker="s",
+            color="none",
+            markerfacecolor="#ffcc00",
+            markeredgecolor="#9a7a00",
+            markersize=5,
+            label="Whitebox CostDistance",
+        ),
         Line2D([0], [0], marker="o", color="black", lw=0, label="Waypoint"),
         Patch(facecolor="none", edgecolor="#111111", hatch="////", label="Barrier"),
     ]
@@ -864,14 +1070,15 @@ def plot_route_map(
         for index, label in LAND_USE_LABELS.items()
     ]
     terrain_ax.legend(handles=route_handles, loc="upper left")
-    land_ax.legend(handles=land_handles + route_handles[:2], loc="upper left", ncols=2)
+    land_ax.legend(handles=land_handles + route_handles[:3], loc="upper left", ncols=2)
 
     ordered_metrics = ordered_route.metrics
     if ordered_metrics is not None:
         fig.suptitle(
             "Large GeoTIFF Route: "
             f"Ordered {ordered_metrics.time_hours * 60.0:.1f} min vs "
-            f"Dijkstra {dijkstra_route.metrics.time_hours * 60.0:.1f} min"
+            f"Dijkstra {dijkstra_route.metrics.time_hours * 60.0:.1f} min vs "
+            f"Whitebox {whitebox_route.metrics.time_hours * 60.0:.1f} min"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=180)
@@ -975,6 +1182,27 @@ def draw_route(
     )
 
 
+def draw_mask_points(
+    ax: Any,
+    path_xy: npt.NDArray[np.float64],
+    *,
+    color: str,
+    label: str,
+) -> None:
+    if len(path_xy) == 0:
+        return
+    ax.scatter(
+        path_xy[:, 0],
+        path_xy[:, 1],
+        s=7,
+        c=color,
+        edgecolors="none",
+        alpha=0.82,
+        label=label,
+        zorder=5,
+    )
+
+
 def draw_waypoints(ax: Any, waypoints: tuple[tuple[float, float], ...]) -> None:
     xs = [point[0] for point in waypoints]
     ys = [point[1] for point in waypoints]
@@ -1000,6 +1228,7 @@ def write_summary(
     route: OptimalPathResult,
     *,
     dijkstra_route: BaselineRoute,
+    whitebox_route: BaselineRoute,
     land_use_path: Path,
     elevation_path: Path,
     size: int,
@@ -1048,7 +1277,29 @@ def write_summary(
                         for leg in dijkstra_route.legs
                     ],
                 },
-                "comparison": comparison_to_json(route.metrics, dijkstra_route.metrics),
+                "whitebox_cost_distance": {
+                    "total": metrics_to_json(whitebox_route.metrics),
+                    "legs": [
+                        {
+                            "index": leg.index,
+                            "cost": leg.cost,
+                            "path_mask_points": int(len(leg.path_xy)),
+                            "metrics": metrics_to_json(leg.metrics),
+                        }
+                        for leg in whitebox_route.legs
+                    ],
+                    "note": (
+                        "WhiteboxTools is run through distance_rs.baselines.whitebox_cost_distance. "
+                        "It uses the cost surface and barriers, but does not support this example's "
+                        "elevation or vertical-factor model."
+                    ),
+                },
+                "comparisons": {
+                    "raster_dijkstra": comparison_to_json(route.metrics, dijkstra_route.metrics),
+                    "whitebox_cost_distance": comparison_to_json(
+                        route.metrics, whitebox_route.metrics
+                    ),
+                },
             },
             indent=2,
         ),
@@ -1096,6 +1347,7 @@ def print_summary(
     route: OptimalPathResult,
     *,
     dijkstra_route: BaselineRoute,
+    whitebox_route: BaselineRoute,
     route_geojson_path: Path,
     summary_path: Path,
     plot_path: Path,
@@ -1103,6 +1355,7 @@ def print_summary(
     metrics = route.metrics
     print(f"ordered-upwind vertices: {len(route.path_xy)}")
     print(f"raster-dijkstra vertices: {len(dijkstra_route.path_xy)}")
+    print(f"whitebox pathway cells: {len(whitebox_route.path_xy)}")
     print(f"legs: {len(route.legs)}")
     if metrics is not None:
         print(
@@ -1117,6 +1370,34 @@ def print_summary(
             f"{dijkstra_route.metrics.time_hours * 60.0:.2f} min, "
             f"cost {dijkstra_route.metrics.cost:.1f}"
         )
+        print(
+            "whitebox costdistance: "
+            f"{whitebox_route.metrics.time_hours * 60.0:.2f} min, "
+            f"cost {whitebox_route.metrics.cost:.1f}"
+        )
+        print("\ndistance-rs surface evaluation")
+        print(
+            "ordered upwind: "
+            f"{metrics.distance_m:.1f} m, "
+            f"{metrics.time_hours * 60.0:.2f} min, "
+            f"cost {metrics.cost:.1f}"
+        )
+        if dijkstra_route.reference_metrics is not None:
+            ref = dijkstra_route.reference_metrics
+            print(
+                "raster dijkstra: "
+                f"{ref.distance_m:.1f} m, "
+                f"{ref.time_hours * 60.0:.2f} min, "
+                f"cost {ref.cost:.1f}"
+            )
+        if whitebox_route.reference_metrics is not None:
+            ref = whitebox_route.reference_metrics
+            print(
+                "whitebox costdistance: "
+                f"{ref.distance_m:.1f} m, "
+                f"{ref.time_hours * 60.0:.2f} min, "
+                f"cost {ref.cost:.1f}"
+            )
         print(
             "delta ordered-dijkstra: "
             f"{metrics.distance_m - dijkstra_route.metrics.distance_m:.1f} m, "

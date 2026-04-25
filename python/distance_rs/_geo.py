@@ -29,7 +29,8 @@ from ._distance import (
     RasterSurface,
     VerticalFactor,
     distance_accumulation,
-    optimal_path_as_line,
+    evaluate_path_cost as _evaluate_raster_path_cost,
+    optimal_path_trace,
 )
 
 
@@ -39,6 +40,7 @@ XY = tuple[float, float]
 
 __all__ = [
     "CostRaster",
+    "evaluate_path_cost",
     "GeoBarriers",
     "GeoGrid",
     "GeoPoints",
@@ -138,6 +140,18 @@ class GeoGrid:
             out[index] = self._continuous_cell_to_xy(row, col)
         return out
 
+    def xy_line_to_raster(self, line_xy: Any) -> npt.NDArray[np.float64]:
+        line = _line_coordinates(line_xy)
+        inverse = ~self.transform
+        out = np.empty_like(line, dtype=np.float64)
+        for index, (x_coord, y_coord) in enumerate(line):
+            col, row = inverse * (float(x_coord), float(y_coord))
+            out[index] = (
+                (float(col) - 0.5) * self.cell_size[0],
+                (float(row) - 0.5) * self.cell_size[1],
+            )
+        return out
+
     def _continuous_cell_to_xy(self, row: float, col: float) -> XY:
         # Solver coordinates use integer row/col values at cell centers.
         x_coord, y_coord = self.transform * (col + 0.5, row + 0.5)
@@ -173,6 +187,7 @@ class OptimalPathLeg:
     cost: float
     grid: GeoGrid
     metrics: PathMetrics | None
+    trace_metadata: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -329,10 +344,10 @@ def route_path(
             target=destination_cell,
             vertical_factor=vf,
         )
-        path_cell_xy = optimal_path_as_line(accumulation, destination_cell)
-        if isinstance(path_cell_xy, list):
+        trace = optimal_path_trace(accumulation, destination_cell)
+        if isinstance(trace, list):
             raise RuntimeError("single destination unexpectedly produced multiple paths")
-        path_xy = geo.grid.raster_line_to_xy(path_cell_xy)[::-1].copy()
+        path_xy = geo.grid.raster_line_to_xy(trace.line)[::-1].copy()
         cost_value = _destination_cost(accumulation.distance, destination_cell)
         metrics = (
             _path_metrics(
@@ -361,6 +376,7 @@ def route_path(
                 cost=cost_value,
                 grid=geo.grid,
                 metrics=metrics,
+                trace_metadata=trace.metadata,
             )
         )
         path_parts.append(path_xy if not path_parts else path_xy[1:])
@@ -372,6 +388,35 @@ def route_path(
         waypoint_xy=waypoint_xy,
         crs=target,
         metrics=total_metrics,
+    )
+
+
+def evaluate_path_cost(
+    surface: GeoSurface | RasterSurface | npt.ArrayLike,
+    line_xy: Any,
+    *,
+    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
+    max_step: float | None = None,
+) -> float:
+    """Evaluate a directional path against a raster or geospatial surface.
+
+    For `GeoSurface`, `line_xy` is interpreted in the surface CRS and converted
+    into the solver's raster x/y grid before delegating to the low-level
+    evaluator. Plain `RasterSurface` inputs use solver-grid coordinates.
+    """
+
+    if isinstance(surface, GeoSurface):
+        return _evaluate_raster_path_cost(
+            surface.surface,
+            surface.grid.xy_line_to_raster(line_xy),
+            vertical_factor=vertical_factor,
+            max_step=max_step,
+        )
+    return _evaluate_raster_path_cost(
+        surface,
+        line_xy,
+        vertical_factor=vertical_factor,
+        max_step=max_step,
     )
 
 
@@ -953,6 +998,26 @@ def _coords_from_geometry(geometry: Mapping[str, Any]) -> list[XY]:
     if kind == "MultiLineString":
         return [_xy_pair(item) for part in geometry.get("coordinates", []) for item in part]
     raise ValueError(f"waypoint geometry type {kind!r} is not supported")
+
+
+def _line_coordinates(line_xy: Any) -> npt.NDArray[np.float64]:
+    if isinstance(line_xy, Mapping):
+        coords = _coords_from_geometry(line_xy)
+    elif isinstance(line_xy, BaseGeometry) or hasattr(line_xy, "__geo_interface__"):
+        coords = _coords_from_geometry(line_xy.__geo_interface__)
+    elif hasattr(line_xy, "coords"):
+        coords = [_xy_pair(item) for item in line_xy.coords]
+    else:
+        coords = line_xy
+
+    line = np.asarray(coords, dtype=np.float64)
+    if line.ndim != 2 or line.shape[1] != 2:
+        raise ValueError("line_xy must have shape (n, 2)")
+    if len(line) == 0:
+        raise ValueError("line_xy must contain at least one point")
+    if not np.all(np.isfinite(line)):
+        raise ValueError("line_xy coordinates must be finite")
+    return np.ascontiguousarray(line, dtype=np.float64)
 
 
 def _coords_from_sequence(value: Any) -> list[XY]:

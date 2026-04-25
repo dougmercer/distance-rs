@@ -2,7 +2,7 @@ use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyDict};
 
 use crate::grid::MIN_COST;
 use crate::path::{trace_optimal_path, PathTraceError, TraceRequest};
@@ -21,6 +21,8 @@ fn distance_accumulation<'py>(
     cell_size_x: f64,
     cell_size_y: f64,
     target_cells: Option<PyReadonlyArray2<'py, i64>>,
+    progress_callback: Option<Bound<'py, PyAny>>,
+    progress_interval: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let source_cells = source_cells.as_array();
     let cost_surface = cost_surface.as_array();
@@ -153,6 +155,8 @@ fn distance_accumulation<'py>(
         } else {
             Some(&targets_flat)
         },
+        progress_callback.as_ref(),
+        progress_interval,
     )?;
 
     let parent_a: Vec<i64> = output.parent.iter().map(|parent| parent.a).collect();
@@ -211,7 +215,7 @@ fn optimal_path_as_line<'py>(
     origin_y: f64,
     max_steps: usize,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let coords = trace_optimal_path(TraceRequest {
+    let output = trace_optimal_path(TraceRequest {
         distance: distance.as_array(),
         valid: valid.as_array(),
         back_direction: back_direction.as_array(),
@@ -226,19 +230,99 @@ fn optimal_path_as_line<'py>(
         origin_y,
         max_steps,
     })
-    .map_err(|err| match err {
-        PathTraceError::Value(message) => PyValueError::new_err(message),
-        PathTraceError::Runtime(message) => PyRuntimeError::new_err(message),
-    })?;
+    .map_err(path_trace_py_error)?;
 
+    let coords = output.coords;
     let vertices = coords.len() / 2;
     Ok(Array2::from_shape_vec((vertices, 2), coords)
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         .into_pyarray(py))
 }
 
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn optimal_path_trace<'py>(
+    py: Python<'py>,
+    distance: PyReadonlyArray2<'py, f64>,
+    valid: PyReadonlyArray2<'py, bool>,
+    back_direction: PyReadonlyArray2<'py, f64>,
+    parent_a: PyReadonlyArray2<'py, i64>,
+    parent_b: PyReadonlyArray2<'py, i64>,
+    parent_weight: PyReadonlyArray2<'py, f64>,
+    start_row: isize,
+    start_col: isize,
+    cell_size_x: f64,
+    cell_size_y: f64,
+    origin_x: f64,
+    origin_y: f64,
+    max_steps: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let output = trace_optimal_path(TraceRequest {
+        distance: distance.as_array(),
+        valid: valid.as_array(),
+        back_direction: back_direction.as_array(),
+        parent_a: parent_a.as_array(),
+        parent_b: parent_b.as_array(),
+        parent_weight: parent_weight.as_array(),
+        start_row,
+        start_col,
+        cell_size_x,
+        cell_size_y,
+        origin_x,
+        origin_y,
+        max_steps,
+    })
+    .map_err(path_trace_py_error)?;
+
+    let coords = output.coords;
+    let vertices = coords.len() / 2;
+    let line = Array2::from_shape_vec((vertices, 2), coords)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+        .into_pyarray(py);
+    let metadata = PyDict::new(py);
+    metadata.set_item("direction_steps", output.metadata.direction_steps)?;
+    metadata.set_item(
+        "parent_lattice_fallbacks",
+        output.metadata.parent_lattice_fallbacks,
+    )?;
+    metadata.set_item(
+        "proposed_cell_center_fallbacks",
+        output.metadata.proposed_cell_center_fallbacks,
+    )?;
+    metadata.set_item(
+        "current_cell_center_fallbacks",
+        output.metadata.current_cell_center_fallbacks,
+    )?;
+    metadata.set_item(
+        "direct_parent_point_fallbacks",
+        output.metadata.direct_parent_point_fallbacks,
+    )?;
+    metadata.set_item(
+        "non_descending_rejections",
+        output.metadata.non_descending_rejections,
+    )?;
+    let total_fallbacks = output.metadata.parent_lattice_fallbacks
+        + output.metadata.proposed_cell_center_fallbacks
+        + output.metadata.current_cell_center_fallbacks
+        + output.metadata.direct_parent_point_fallbacks;
+    metadata.set_item("total_fallbacks", total_fallbacks)?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("line", line)?;
+    dict.set_item("metadata", metadata)?;
+    Ok(dict)
+}
+
+fn path_trace_py_error(err: PathTraceError) -> PyErr {
+    match err {
+        PathTraceError::Value(message) => PyValueError::new_err(message),
+        PathTraceError::Runtime(message) => PyRuntimeError::new_err(message),
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(distance_accumulation, m)?)?;
     m.add_function(wrap_pyfunction!(optimal_path_as_line, m)?)?;
+    m.add_function(wrap_pyfunction!(optimal_path_trace, m)?)?;
     Ok(())
 }
