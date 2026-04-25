@@ -1,5 +1,6 @@
 use crate::grid::{EPS, NEIGHBORS_8};
 use crate::solver::{value_improves, HeapEntry, Parent, Solver, TRIAL};
+use crate::vertical::VerticalFactorKind;
 
 const GOLDEN_SECTION_ITERATIONS: usize = 14;
 
@@ -209,18 +210,44 @@ impl<'a> SegmentContext<'a> {
             .back_direction_to_coord(self.idx, parent_row, parent_col)
     }
 
-    fn constant_cost_stationary_weight(&self) -> Option<f64> {
+    fn constant_surface_factor(&self) -> Option<f64> {
+        let factor = match self.solver.vf.kind {
+            VerticalFactorKind::None => 1.0,
+            VerticalFactorKind::Binary
+                if self.solver.vf.zero_factor > 0.0
+                    && (!self.solver.has_elevation
+                        || (self.solver.vf.low_cut_slope == f64::NEG_INFINITY
+                            && self.solver.vf.high_cut_slope == f64::INFINITY)) =>
+            {
+                self.solver.vf.zero_factor
+            }
+            _ => return None,
+        };
+        factor.is_finite().then_some(factor)
+    }
+
+    fn constant_factor_stationary_weight(&self, factor: f64) -> Option<f64> {
         let ux = (self.a_col - self.b_col) * self.solver.grid.cell_size_x;
         let uy = (self.a_row - self.b_row) * self.solver.grid.cell_size_y;
+        let uz = if self.solver.has_elevation {
+            self.elevation_a - self.elevation_b
+        } else {
+            0.0
+        };
         let vx = (self.b_col - self.p_col) * self.solver.grid.cell_size_x;
         let vy = (self.b_row - self.p_row) * self.solver.grid.cell_size_y;
+        let vz = if self.solver.has_elevation {
+            self.elevation_b - self.elevation_idx
+        } else {
+            0.0
+        };
 
-        let u_sq = ux * ux + uy * uy;
+        let u_sq = ux * ux + uy * uy + uz * uz;
         if u_sq <= EPS {
             return None;
         }
 
-        let local_cost = self.cost_idx;
+        let local_cost = self.cost_idx * factor;
         if local_cost <= EPS {
             return None;
         }
@@ -231,8 +258,8 @@ impl<'a> SegmentContext<'a> {
             return None;
         }
 
-        let uv = ux * vx + uy * vy;
-        let v_sq = vx * vx + vy * vy;
+        let uv = ux * vx + uy * vy + uz * vz;
+        let v_sq = vx * vx + vy * vy + vz * vz;
         let perpendicular_sq = (v_sq - uv * uv / u_sq).max(0.0);
         if perpendicular_sq <= EPS {
             return None;
@@ -467,8 +494,10 @@ impl Solver {
 
     fn segment_candidate(&self, idx: usize, a: usize, b: usize) -> Option<(f64, f64, f64)> {
         let context = SegmentContext::new(self, idx, a, b);
-        if self.flat_cost_mode && !self.barriers.has_blocked_cells() {
-            return self.constant_cost_segment_candidate(idx, a, b, &context);
+        if !self.barriers.has_blocked_cells() {
+            if let Some(factor) = context.constant_surface_factor() {
+                return self.constant_factor_segment_candidate(idx, a, b, &context, factor);
+            }
         }
 
         let samples = 8usize;
@@ -511,12 +540,13 @@ impl Solver {
         Some((best_value, best_weight, back_direction))
     }
 
-    fn constant_cost_segment_candidate(
+    fn constant_factor_segment_candidate(
         &self,
         idx: usize,
         a: usize,
         b: usize,
         context: &SegmentContext<'_>,
+        factor: f64,
     ) -> Option<(f64, f64, f64)> {
         let mut best_value = self.endpoint_segment_value(idx, b, context.b_row, context.b_col);
         let mut best_weight = 0.0;
@@ -527,7 +557,7 @@ impl Solver {
             best_weight = 1.0;
         }
 
-        if let Some(weight) = context.constant_cost_stationary_weight() {
+        if let Some(weight) = context.constant_factor_stationary_weight(factor) {
             if weight > 0.0 && weight < 1.0 {
                 let value = context.objective(weight);
                 if value < best_value {
