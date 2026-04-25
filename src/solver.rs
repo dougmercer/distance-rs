@@ -21,7 +21,7 @@ pub(crate) struct HeapEntry {
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.idx == other.idx && self.value.to_bits() == other.value.to_bits()
+        self.idx == other.idx && self.value.total_cmp(&other.value) == Ordering::Equal
     }
 }
 
@@ -37,8 +37,7 @@ impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         other
             .value
-            .partial_cmp(&self.value)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&self.value)
             .then_with(|| other.idx.cmp(&self.idx))
     }
 }
