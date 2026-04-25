@@ -12,6 +12,8 @@ use crate::vertical::{VerticalFactor, VerticalFactorKind};
 pub(crate) const FAR: u8 = 0;
 pub(crate) const TRIAL: u8 = 1;
 pub(crate) const ACCEPTED: u8 = 2;
+const DISTANCE_EPS_ABS: f64 = 1.0e-12;
+const DISTANCE_EPS_REL: f64 = 1.0e-12;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HeapEntry {
@@ -181,7 +183,7 @@ impl Solver {
             if self.state[entry.idx] == ACCEPTED {
                 continue;
             }
-            if entry.value > self.distance[entry.idx] + 1.0e-10 {
+            if value_is_stale(entry.value, self.distance[entry.idx]) {
                 continue;
             }
 
@@ -287,4 +289,21 @@ impl Solver {
             &mut crossings,
         )
     }
+}
+
+pub(crate) fn distance_tolerance(a: f64, b: f64) -> f64 {
+    let scale = a.abs().max(b.abs());
+    if scale.is_finite() {
+        DISTANCE_EPS_ABS.max(scale * DISTANCE_EPS_REL)
+    } else {
+        DISTANCE_EPS_ABS
+    }
+}
+
+pub(crate) fn value_is_stale(value: f64, best: f64) -> bool {
+    value > best + distance_tolerance(value, best)
+}
+
+pub(crate) fn value_improves(value: f64, best: f64) -> bool {
+    value < best - distance_tolerance(value, best)
 }

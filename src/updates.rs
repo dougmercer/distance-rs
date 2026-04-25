@@ -1,5 +1,7 @@
 use crate::grid::{EPS, NEIGHBORS_8};
-use crate::solver::{HeapEntry, Parent, Solver, TRIAL};
+use crate::solver::{value_improves, HeapEntry, Parent, Solver, TRIAL};
+
+const GOLDEN_SECTION_ITERATIONS: usize = 14;
 
 #[derive(Clone, Copy, Debug)]
 struct CandidateUpdate {
@@ -150,7 +152,7 @@ impl<'a> SegmentContext<'a> {
         let mut fc = self.objective(c);
         let mut fd = self.objective(d);
 
-        for _ in 0..24 {
+        for _ in 0..GOLDEN_SECTION_ITERATIONS {
             if fc < fd {
                 hi = d;
                 d = c;
@@ -571,7 +573,7 @@ impl Solver {
     }
 
     fn apply_update(&mut self, update: CandidateUpdate) {
-        if update.value + 1.0e-10 < self.distance[update.idx] {
+        if value_improves(update.value, self.distance[update.idx]) {
             self.distance[update.idx] = update.value;
             self.parent[update.idx] = update.parent;
             self.back_direction[update.idx] = update.back_direction;
