@@ -312,6 +312,8 @@ class DistanceAccumulationResult:
     distance: npt.NDArray[np.float64]
     _back_direction: npt.NDArray[np.float64] = field(repr=False)
     _parent_a: npt.NDArray[np.int64] = field(repr=False)
+    _parent_b: npt.NDArray[np.int64] = field(repr=False)
+    _parent_weight: npt.NDArray[np.float64] = field(repr=False)
     cell_size: tuple[float, float]
     origin: tuple[float, float]
     vertical_factor: VerticalFactor
@@ -369,6 +371,8 @@ def distance_accumulation(
         distance=raw["distance"],
         _back_direction=raw["back_direction"],
         _parent_a=raw["parent_a"],
+        _parent_b=raw["parent_b"],
+        _parent_weight=raw["parent_weight"],
         cell_size=(cell_size_x, cell_size_y),
         origin=(origin_x, origin_y),
         vertical_factor=vf,
@@ -448,6 +452,8 @@ def optimal_path_as_line(
             result.distance,
             result._back_direction,
             result._parent_a,
+            result._parent_b,
+            result._parent_weight,
             int(row),
             int(col),
             result.cell_size[0],

@@ -130,6 +130,8 @@ fn distance_accumulation<'py>(
     let output = solver.solve(&sources_flat)?;
 
     let parent_a: Vec<i64> = output.parent.iter().map(|parent| parent.a).collect();
+    let parent_b: Vec<i64> = output.parent.iter().map(|parent| parent.b).collect();
+    let parent_weight: Vec<f64> = output.parent.iter().map(|parent| parent.weight).collect();
 
     let dict = PyDict::new(py);
     dict.set_item(
@@ -150,6 +152,18 @@ fn distance_accumulation<'py>(
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
             .into_pyarray(py),
     )?;
+    dict.set_item(
+        "parent_b",
+        Array2::from_shape_vec((rows, cols), parent_b)
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "parent_weight",
+        Array2::from_shape_vec((rows, cols), parent_weight)
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+            .into_pyarray(py),
+    )?;
     Ok(dict)
 }
 
@@ -160,6 +174,8 @@ fn optimal_path_as_line<'py>(
     distance: PyReadonlyArray2<'py, f64>,
     back_direction: PyReadonlyArray2<'py, f64>,
     parent_a: PyReadonlyArray2<'py, i64>,
+    parent_b: PyReadonlyArray2<'py, i64>,
+    parent_weight: PyReadonlyArray2<'py, f64>,
     start_row: isize,
     start_col: isize,
     cell_size_x: f64,
@@ -172,6 +188,8 @@ fn optimal_path_as_line<'py>(
         distance: distance.as_array(),
         back_direction: back_direction.as_array(),
         parent_a: parent_a.as_array(),
+        parent_b: parent_b.as_array(),
+        parent_weight: parent_weight.as_array(),
         start_row,
         start_col,
         cell_size_x,

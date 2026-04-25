@@ -132,6 +132,21 @@ uv run python examples/maze_route.py
 
 The script saves `results/maze-route/maze_route.png`.
 
+## Barrier Back-Direction Replay Plot
+
+Generate a deterministic barrier example that shows the effect of preserving
+surface-aspect back directions instead of replaying every segment update as a
+parent direction. The first panel overlays both traced routes, the second zooms
+to the largest route difference, and the third highlights the cells whose
+segment-update directions are replayed:
+
+```bash
+uv run --group plot python examples/barrier_back_direction_replay.py
+```
+
+The script saves
+`results/barrier-back-direction-replay/barrier_back_direction_replay.png`.
+
 ## Ridge Pass Showcase
 
 Generate a terrain example designed to make the solver differences visible:

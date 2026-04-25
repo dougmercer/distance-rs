@@ -12,6 +12,8 @@ pub(crate) struct TraceRequest<'a> {
     pub(crate) distance: ArrayView2<'a, f64>,
     pub(crate) back_direction: ArrayView2<'a, f64>,
     pub(crate) parent_a: ArrayView2<'a, i64>,
+    pub(crate) parent_b: ArrayView2<'a, i64>,
+    pub(crate) parent_weight: ArrayView2<'a, f64>,
     pub(crate) start_row: isize,
     pub(crate) start_col: isize,
     pub(crate) cell_size_x: f64,
@@ -84,7 +86,11 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
     let rows = shape[0];
     let cols = shape[1];
 
-    if request.back_direction.shape() != shape || request.parent_a.shape() != shape {
+    if request.back_direction.shape() != shape
+        || request.parent_a.shape() != shape
+        || request.parent_b.shape() != shape
+        || request.parent_weight.shape() != shape
+    {
         return Err(PathTraceError::Value(
             "direction and parent arrays must match distance shape".to_string(),
         ));
@@ -129,8 +135,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
             return Err(path_trace_error("entered a non-finite cell"));
         }
 
-        let a = request.parent_a[[current_row, current_col]];
-        if a < 0 {
+        let Some(parent_point) = parent_trace_point(&request, current_row, current_col)? else {
             let source_center = TracePoint::at_cell_center(current_row, current_col);
             if !cursor.point.is_near(source_center) {
                 push_world_coord(
@@ -143,21 +148,18 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
                 );
             }
             break;
-        }
+        };
 
         let degrees = request.back_direction[[current_row, current_col]];
-        if !degrees.is_finite() {
-            return Err(path_trace_error("encountered a non-finite direction"));
-        }
-        let previous = cursor.point;
-        let proposed = next_trace_step(&cursor, degrees, request.cell_size_x, request.cell_size_y)?;
-        let repaired = repair_blocked_step(
-            &request.distance,
-            previous,
-            proposed,
-            TracePoint::at_cell_center(current_row, current_col),
+        let next = next_clear_trace_step(
+            &request,
+            &cursor,
+            degrees,
+            parent_point,
+            request.cell_size_x,
+            request.cell_size_y,
         )?;
-        cursor.move_to(repaired);
+        cursor.move_to(next);
 
         push_world_coord(
             &mut coords,
@@ -181,6 +183,147 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
 
 fn path_trace_error(reason: &str) -> PathTraceError {
     PathTraceError::Runtime(format!("path tracing {reason}"))
+}
+
+fn parent_trace_point(
+    request: &TraceRequest<'_>,
+    row: usize,
+    col: usize,
+) -> Result<Option<TracePoint>, PathTraceError> {
+    let a = request.parent_a[[row, col]];
+    if a < 0 {
+        return Ok(None);
+    }
+
+    let shape = request.distance.shape();
+    let point_a = trace_point_from_flat_index(a, shape[0], shape[1])?;
+    let b = request.parent_b[[row, col]];
+    if b < 0 {
+        return Ok(Some(point_a));
+    }
+
+    let weight_a = request.parent_weight[[row, col]];
+    if !weight_a.is_finite() {
+        return Err(path_trace_error("encountered a non-finite parent weight"));
+    }
+    let point_b = trace_point_from_flat_index(b, shape[0], shape[1])?;
+    let weight_b = 1.0 - weight_a;
+    Ok(Some(TracePoint {
+        row: weight_a * point_a.row + weight_b * point_b.row,
+        col: weight_a * point_a.col + weight_b * point_b.col,
+    }))
+}
+
+fn trace_point_from_flat_index(
+    idx: i64,
+    rows: usize,
+    cols: usize,
+) -> Result<TracePoint, PathTraceError> {
+    if idx < 0 || idx as usize >= rows * cols {
+        return Err(path_trace_error("encountered an out-of-bounds parent"));
+    }
+    let idx = idx as usize;
+    Ok(TracePoint::at_cell_center(idx / cols, idx % cols))
+}
+
+fn next_clear_trace_step(
+    request: &TraceRequest<'_>,
+    cursor: &TraceCursor,
+    degrees: f64,
+    parent_point: TracePoint,
+    cell_size_x: f64,
+    cell_size_y: f64,
+) -> Result<TracePoint, PathTraceError> {
+    if degrees.is_finite() {
+        if let Ok(proposed) = next_trace_step(cursor, degrees, cell_size_x, cell_size_y) {
+            if let Some(step) =
+                clear_continuable_step(request, cursor, proposed, cell_size_x, cell_size_y)?
+            {
+                return Ok(step);
+            }
+        }
+    }
+
+    let parent_step = next_trace_step_toward(cursor, parent_point)?;
+    if let Some(step) =
+        clear_continuable_step(request, cursor, parent_step, cell_size_x, cell_size_y)?
+    {
+        return Ok(step);
+    }
+
+    Err(path_trace_error("crossed a non-finite cell"))
+}
+
+fn clear_continuable_step(
+    request: &TraceRequest<'_>,
+    cursor: &TraceCursor,
+    proposed: TracePoint,
+    cell_size_x: f64,
+    cell_size_y: f64,
+) -> Result<Option<TracePoint>, PathTraceError> {
+    if !finite_segment_clear(&request.distance, cursor.point, proposed) {
+        return Ok(None);
+    }
+    if trace_can_continue_from(request, proposed, cell_size_x, cell_size_y)? {
+        return Ok(Some(proposed));
+    }
+
+    let (row, col) = cell_for_point(proposed, cursor.rows, cursor.cols)?;
+    let center = TracePoint::at_cell_center(row, col);
+    if !proposed.is_near(center) && finite_segment_clear(&request.distance, cursor.point, center) {
+        return Ok(Some(center));
+    }
+    Ok(None)
+}
+
+fn trace_can_continue_from(
+    request: &TraceRequest<'_>,
+    point: TracePoint,
+    cell_size_x: f64,
+    cell_size_y: f64,
+) -> Result<bool, PathTraceError> {
+    let shape = request.distance.shape();
+    let (row, col) = cell_for_point(point, shape[0], shape[1])?;
+    if !request.distance[[row, col]].is_finite() {
+        return Ok(false);
+    }
+    let Some(parent_point) = parent_trace_point(request, row, col)? else {
+        return Ok(true);
+    };
+
+    let cursor = TraceCursor {
+        point,
+        rows: shape[0],
+        cols: shape[1],
+    };
+    let degrees = request.back_direction[[row, col]];
+    if degrees.is_finite() {
+        if let Ok(proposed) = next_trace_step(&cursor, degrees, cell_size_x, cell_size_y) {
+            if finite_segment_clear(&request.distance, point, proposed) {
+                return Ok(true);
+            }
+        }
+    }
+
+    let Ok(parent_step) = next_trace_step_toward(&cursor, parent_point) else {
+        return Ok(false);
+    };
+    Ok(finite_segment_clear(&request.distance, point, parent_step))
+}
+
+fn cell_for_point(
+    point: TracePoint,
+    rows: usize,
+    cols: usize,
+) -> Result<(usize, usize), PathTraceError> {
+    let row_idx = point.row.round() as isize;
+    let col_idx = point.col.round() as isize;
+    if row_idx < 0 || col_idx < 0 || row_idx >= rows as isize || col_idx >= cols as isize {
+        return Err(PathTraceError::Runtime(
+            "path tracing stepped outside the raster".to_string(),
+        ));
+    }
+    Ok((row_idx as usize, col_idx as usize))
 }
 
 fn next_trace_step(
@@ -213,20 +356,33 @@ fn next_trace_step(
     Ok(next)
 }
 
-fn repair_blocked_step(
-    distance: &ArrayView2<'_, f64>,
-    previous: TracePoint,
-    proposed: TracePoint,
-    current_center: TracePoint,
+fn next_trace_step_toward(
+    cursor: &TraceCursor,
+    target: TracePoint,
 ) -> Result<TracePoint, PathTraceError> {
-    if finite_segment_clear(distance, previous, proposed) {
-        return Ok(proposed);
+    let dr = target.row - cursor.point.row;
+    let dc = target.col - cursor.point.col;
+    if dr.abs() <= 1.0e-12 && dc.abs() <= 1.0e-12 {
+        return Err(path_trace_error("encountered a zero parent direction"));
     }
-    if !previous.is_near(current_center) && finite_segment_clear(distance, previous, current_center)
+
+    let t = next_lattice_crossing(cursor.point.row, cursor.point.col, dr, dc)?.min(1.0);
+    let mut next = TracePoint {
+        row: cursor.point.row + dr * t,
+        col: cursor.point.col + dc * t,
+    };
+
+    if next.row < -1.0e-7
+        || next.col < -1.0e-7
+        || next.row > (cursor.rows - 1) as f64 + 1.0e-7
+        || next.col > (cursor.cols - 1) as f64 + 1.0e-7
     {
-        return Ok(current_center);
+        return Err(path_trace_error("stepped outside the raster"));
     }
-    Err(path_trace_error("crossed a non-finite cell"))
+
+    next.row = next.row.clamp(0.0, (cursor.rows - 1) as f64);
+    next.col = next.col.clamp(0.0, (cursor.cols - 1) as f64);
+    Ok(next)
 }
 
 fn direction_vector(degrees: f64, cell_size_x: f64, cell_size_y: f64) -> (f64, f64) {

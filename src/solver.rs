@@ -45,19 +45,33 @@ impl Ord for HeapEntry {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Parent {
     pub(crate) a: i64,
+    pub(crate) b: i64,
+    pub(crate) weight: f64,
 }
 
 impl Parent {
     pub(crate) fn none() -> Self {
-        Self { a: -1 }
+        Self {
+            a: -1,
+            b: -1,
+            weight: f64::NAN,
+        }
     }
 
     pub(crate) fn point(a: usize) -> Self {
-        Self { a: a as i64 }
+        Self {
+            a: a as i64,
+            b: -1,
+            weight: 1.0,
+        }
     }
 
-    pub(crate) fn segment(a: usize, _b: usize, _weight: f64) -> Self {
-        Self { a: a as i64 }
+    pub(crate) fn segment(a: usize, b: usize, weight: f64) -> Self {
+        Self {
+            a: a as i64,
+            b: b as i64,
+            weight,
+        }
     }
 }
 

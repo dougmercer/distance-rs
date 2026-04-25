@@ -130,6 +130,32 @@ def test_flat_back_direction_tracks_euclidean_angle() -> None:
     assert _angle_delta(result._back_direction[destination], expected) < 5.0
 
 
+def test_segment_parent_geometry_is_preserved() -> None:
+    result = distance_accumulation(np.ones((21, 21), dtype=float), source=(10, 10))
+
+    segment_parent_cells = result._parent_b >= 0
+
+    assert np.any(segment_parent_cells)
+    assert np.all((result._parent_weight[segment_parent_cells] > 0.0))
+    assert np.all((result._parent_weight[segment_parent_cells] < 1.0))
+
+
+def test_unrelated_barrier_does_not_replace_surface_back_direction() -> None:
+    cost = np.ones((61, 61), dtype=float)
+    source = (30, 30)
+    destination = (31, 2)
+    expected = distance_accumulation(cost, source=source)
+    barriers = np.zeros_like(cost, dtype=bool)
+    barriers[0, 0] = True
+
+    result = distance_accumulation(RasterSurface(cost, barriers=barriers), source=source)
+
+    assert _angle_delta(
+        result._back_direction[destination],
+        expected._back_direction[destination],
+    ) < 0.01
+
+
 def test_optimal_path_as_line_repairs_invalid_direction_step_locally() -> None:
     source, destination, cost, barriers = _make_maze_case(
         maze_rows=11,

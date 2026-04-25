@@ -559,13 +559,9 @@ impl Solver {
         value: f64,
         weight: f64,
     ) -> Option<f64> {
-        let parent_direction = || context.parent_back_direction(weight);
-        if self.barriers.has_blocked_cells() {
-            return parent_direction();
-        }
         context
             .plane_back_direction(value)
-            .or_else(parent_direction)
+            .or_else(|| context.parent_back_direction(weight))
     }
 
     fn surface_distance(&self, plan_distance: f64, dz: f64) -> f64 {
