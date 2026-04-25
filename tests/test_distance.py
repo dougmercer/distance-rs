@@ -25,6 +25,14 @@ def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
     assert math.isclose(result.distance[13, 14], 5.0, rel_tol=0.08)
 
 
+def test_cost_accumulation_uses_target_cell_cost_for_local_slope() -> None:
+    cost = np.array([[1.0, 9.0, 1.0]], dtype=float)
+
+    result = distance_accumulation(cost, source=(0, 0))
+
+    assert result.distance[0, 1] == np.float64(9.0)
+
+
 def test_barrier_blocks_cells() -> None:
     cost = np.ones((11, 11), dtype=float)
     barriers = np.zeros((11, 11), dtype=bool)

@@ -65,8 +65,6 @@ struct SegmentContext<'a> {
     p_row: f64,
     p_col: f64,
     cost_idx: f64,
-    cost_a: f64,
-    cost_b: f64,
     distance_a: f64,
     distance_b: f64,
     elevation_idx: f64,
@@ -98,8 +96,6 @@ impl<'a> SegmentContext<'a> {
             p_row: p_row as f64,
             p_col: p_col as f64,
             cost_idx: solver.cost[idx],
-            cost_a: solver.cost[a],
-            cost_b: solver.cost[b],
             distance_a: solver.distance[a],
             distance_b: solver.distance[b],
             elevation_idx,
@@ -127,11 +123,9 @@ impl<'a> SegmentContext<'a> {
             return f64::INFINITY;
         }
 
-        let y_cost = weight_a * self.cost_a + weight_b * self.cost_b;
-        let local_cost = 0.5 * (self.cost_idx + y_cost);
         let front_value = weight_a * self.distance_a + weight_b * self.distance_b;
         if self.solver.flat_cost_mode {
-            return front_value + plan_distance * local_cost;
+            return front_value + plan_distance * self.cost_idx;
         }
 
         let y_elevation = weight_a * self.elevation_a + weight_b * self.elevation_b;
@@ -147,7 +141,7 @@ impl<'a> SegmentContext<'a> {
             return f64::INFINITY;
         }
 
-        front_value + surface_distance * local_cost * vf
+        front_value + surface_distance * self.cost_idx * vf
     }
 
     fn golden_section(&self, mut lo: f64, mut hi: f64) -> Option<(f64, f64)> {
@@ -225,7 +219,7 @@ impl<'a> SegmentContext<'a> {
             return None;
         }
 
-        let local_cost = 0.5 * (self.cost_idx + self.cost_a);
+        let local_cost = self.cost_idx;
         if local_cost <= EPS {
             return None;
         }
@@ -454,9 +448,8 @@ impl Solver {
         if plan_distance <= EPS {
             return None;
         }
-        let local_cost = 0.5 * (self.cost[idx] + self.cost[q]);
         if self.flat_cost_mode {
-            return Some(self.distance[q] + plan_distance * local_cost);
+            return Some(self.distance[q] + plan_distance * self.cost[idx]);
         }
         let dz = if self.has_elevation {
             self.elevation[idx] - self.elevation[q]
@@ -469,15 +462,12 @@ impl Solver {
         if !vf.is_finite() {
             return None;
         }
-        Some(self.distance[q] + surface_distance * local_cost * vf)
+        Some(self.distance[q] + surface_distance * self.cost[idx] * vf)
     }
 
     fn segment_candidate(&self, idx: usize, a: usize, b: usize) -> Option<(f64, f64, f64)> {
         let context = SegmentContext::new(self, idx, a, b);
-        if self.flat_cost_mode
-            && !self.barriers.has_blocked_cells()
-            && (context.cost_a - context.cost_b).abs() <= EPS
-        {
+        if self.flat_cost_mode && !self.barriers.has_blocked_cells() {
             return self.constant_cost_segment_candidate(idx, a, b, &context);
         }
 
