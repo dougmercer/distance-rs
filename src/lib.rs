@@ -17,19 +17,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use crate::solver::{Solver, SolverInput};
-    use crate::vertical::{VerticalFactor, VerticalFactorKind};
+    use crate::vertical::VerticalFactor;
 
     fn flat_vf() -> VerticalFactor {
-        VerticalFactor {
-            kind: VerticalFactorKind::None,
-            zero_factor: 1.0,
-            low_cut_angle: -90.0,
-            high_cut_angle: 90.0,
-            slope: 0.0,
-            power: 1.0,
-            cos_power: 1.0,
-            sec_power: 1.0,
-        }
+        VerticalFactor::none()
     }
 
     #[test]

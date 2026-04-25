@@ -134,12 +134,11 @@ impl<'a> SegmentContext<'a> {
         } else {
             0.0
         };
-        let surface_distance = self.solver.surface_distance(plan_distance, dz);
-        let angle = self.solver.vertical_angle(plan_distance, dz);
-        let vf = self.solver.vf.factor(angle);
+        let vf = self.solver.vf.factor_from_rise_run(plan_distance, dz);
         if !vf.is_finite() {
             return f64::INFINITY;
         }
+        let surface_distance = self.solver.surface_distance(plan_distance, dz);
 
         front_value + surface_distance * self.cost_idx * vf
     }
@@ -456,12 +455,11 @@ impl Solver {
         } else {
             0.0
         };
-        let surface_distance = self.surface_distance(plan_distance, dz);
-        let angle = self.vertical_angle(plan_distance, dz);
-        let vf = self.vf.factor(angle);
+        let vf = self.vf.factor_from_rise_run(plan_distance, dz);
         if !vf.is_finite() {
             return None;
         }
+        let surface_distance = self.surface_distance(plan_distance, dz);
         Some(self.distance[q] + surface_distance * self.cost[idx] * vf)
     }
 
@@ -569,14 +567,6 @@ impl Solver {
             plan_distance.hypot(dz)
         } else {
             plan_distance
-        }
-    }
-
-    fn vertical_angle(&self, plan_distance: f64, dz: f64) -> f64 {
-        if self.has_elevation {
-            dz.atan2(plan_distance).to_degrees()
-        } else {
-            0.0
         }
     }
 
