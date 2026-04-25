@@ -310,6 +310,7 @@ class RasterSurface:
 @dataclass
 class DistanceAccumulationResult:
     distance: npt.NDArray[np.float64]
+    _valid: npt.NDArray[np.bool_] = field(repr=False)
     _back_direction: npt.NDArray[np.float64] = field(repr=False)
     _parent_a: npt.NDArray[np.int64] = field(repr=False)
     _parent_b: npt.NDArray[np.int64] = field(repr=False)
@@ -331,6 +332,7 @@ def distance_accumulation(
     surface: RasterSurface | npt.ArrayLike,
     source: Cell | Sequence[Cell] | npt.ArrayLike,
     *,
+    target: Cell | Sequence[Cell] | npt.ArrayLike | None = None,
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
 ) -> DistanceAccumulationResult:
     """Compute accumulated cost distance from one or more source cells.
@@ -339,6 +341,8 @@ def distance_accumulation(
     `(row, col)` cell or an `(n, 2)` sequence of cells. The route-level API uses
     one source per leg; accepting multiple cells here keeps the native solver
     useful for accumulation/allocation workflows without exposing source rasters.
+    When `target` is supplied, cells not needed to settle the requested target
+    cell(s) may remain infinite in the returned distance raster.
     """
 
     if not isinstance(surface, RasterSurface):
@@ -352,6 +356,8 @@ def distance_accumulation(
     elevation_arr = _optional_surface_array(surface.elevation, cost_arr.shape, "elevation")
     barrier_arr = _optional_barrier_array(surface.barriers, cost_arr.shape)
     source_cells = _normalize_source_cells(source, cost_arr.shape)
+    target_cells = None if target is None else _normalize_target_cells(target, cost_arr.shape)
+    valid_arr = _valid_surface_mask(cost_arr, elevation_arr, barrier_arr)
 
     cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
     vf = VerticalFactor.from_any(vertical_factor)
@@ -365,10 +371,12 @@ def distance_accumulation(
         vf.as_native(),
         cell_size_x,
         cell_size_y,
+        target_cells,
     )
 
     return DistanceAccumulationResult(
         distance=raw["distance"],
+        _valid=valid_arr,
         _back_direction=raw["back_direction"],
         _parent_a=raw["parent_a"],
         _parent_b=raw["parent_b"],
@@ -408,19 +416,35 @@ def _normalize_source_cells(
     source: Cell | Sequence[Cell] | npt.ArrayLike,
     shape: tuple[int, int],
 ) -> npt.NDArray[np.int64]:
-    cells_float = np.asarray(source, dtype=np.float64)
+    return _normalize_cells(source, shape, name="source")
+
+
+def _normalize_target_cells(
+    target: Cell | Sequence[Cell] | npt.ArrayLike,
+    shape: tuple[int, int],
+) -> npt.NDArray[np.int64]:
+    return _normalize_cells(target, shape, name="target")
+
+
+def _normalize_cells(
+    value: Cell | Sequence[Cell] | npt.ArrayLike,
+    shape: tuple[int, int],
+    *,
+    name: str,
+) -> npt.NDArray[np.int64]:
+    cells_float = np.asarray(value, dtype=np.float64)
     if cells_float.ndim == 1 and cells_float.shape == (2,):
         cells_float = cells_float.reshape(1, 2)
     if cells_float.ndim != 2 or cells_float.shape[1] != 2:
-        raise ValueError("source must be a (row, col) cell or an (n, 2) cell array")
+        raise ValueError(f"{name} must be a (row, col) cell or an (n, 2) cell array")
     if cells_float.shape[0] == 0:
-        raise ValueError("at least one source cell is required")
+        raise ValueError(f"at least one {name} cell is required")
     if not np.all(np.isfinite(cells_float)):
-        raise ValueError("source cells must be finite")
+        raise ValueError(f"{name} cells must be finite")
 
     rounded = np.rint(cells_float)
     if not np.array_equal(cells_float, rounded):
-        raise ValueError("source cells must be integer row/col coordinates")
+        raise ValueError(f"{name} cells must be integer row/col coordinates")
     cells = np.ascontiguousarray(rounded.astype(np.int64))
 
     rows, cols = shape
@@ -430,8 +454,21 @@ def _normalize_source_cells(
         or np.any(cells[:, 0] >= rows)
         or np.any(cells[:, 1] >= cols)
     ):
-        raise ValueError("source cell is outside the raster")
+        raise ValueError(f"{name} cell is outside the raster")
     return cells
+
+
+def _valid_surface_mask(
+    cost: npt.NDArray[np.float64],
+    elevation: npt.NDArray[np.float64] | None,
+    barriers: npt.NDArray[np.bool_] | None,
+) -> npt.NDArray[np.bool_]:
+    valid = np.isfinite(cost)
+    if elevation is not None:
+        valid = valid & np.isfinite(elevation)
+    if barriers is not None:
+        valid = valid & ~barriers
+    return np.ascontiguousarray(valid, dtype=np.bool_)
 
 
 def optimal_path_as_line(
@@ -450,6 +487,7 @@ def optimal_path_as_line(
         max_steps_value = _normalize_max_steps(max_steps)
         return _native.optimal_path_as_line(
             result.distance,
+            result._valid,
             result._back_direction,
             result._parent_a,
             result._parent_b,

@@ -323,7 +323,12 @@ def route_path(
         _validate_endpoint(geo, source_cell, "source")
         _validate_endpoint(geo, destination_cell, "destination")
 
-        accumulation = distance_accumulation(geo.surface, source_cell, vertical_factor=vf)
+        accumulation = distance_accumulation(
+            geo.surface,
+            source_cell,
+            target=destination_cell,
+            vertical_factor=vf,
+        )
         path_cell_xy = optimal_path_as_line(accumulation, destination_cell)
         if isinstance(path_cell_xy, list):
             raise RuntimeError("single destination unexpectedly produced multiple paths")

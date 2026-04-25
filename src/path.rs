@@ -10,6 +10,7 @@ pub(crate) enum PathTraceError {
 
 pub(crate) struct TraceRequest<'a> {
     pub(crate) distance: ArrayView2<'a, f64>,
+    pub(crate) valid: ArrayView2<'a, bool>,
     pub(crate) back_direction: ArrayView2<'a, f64>,
     pub(crate) parent_a: ArrayView2<'a, i64>,
     pub(crate) parent_b: ArrayView2<'a, i64>,
@@ -86,13 +87,14 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
     let rows = shape[0];
     let cols = shape[1];
 
-    if request.back_direction.shape() != shape
+    if request.valid.shape() != shape
+        || request.back_direction.shape() != shape
         || request.parent_a.shape() != shape
         || request.parent_b.shape() != shape
         || request.parent_weight.shape() != shape
     {
         return Err(PathTraceError::Value(
-            "direction and parent arrays must match distance shape".to_string(),
+            "valid, direction, and parent arrays must match distance shape".to_string(),
         ));
     }
     if request.start_row < 0
@@ -105,7 +107,9 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
         ));
     }
 
-    if !request.distance[[request.start_row as usize, request.start_col as usize]].is_finite() {
+    if !request.valid[[request.start_row as usize, request.start_col as usize]]
+        || !request.distance[[request.start_row as usize, request.start_col as usize]].is_finite()
+    {
         return Err(PathTraceError::Value(
             "destination has no finite accumulated distance".to_string(),
         ));
@@ -131,7 +135,9 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<Vec<f64>, 
 
     loop {
         let (current_row, current_col) = cursor.current_cell()?;
-        if !request.distance[[current_row, current_col]].is_finite() {
+        if !request.valid[[current_row, current_col]]
+            || !request.distance[[current_row, current_col]].is_finite()
+        {
             return Err(path_trace_error("entered a non-finite cell"));
         }
 
@@ -261,7 +267,7 @@ fn clear_continuable_step(
     cell_size_x: f64,
     cell_size_y: f64,
 ) -> Result<Option<TracePoint>, PathTraceError> {
-    if !finite_segment_clear(&request.distance, cursor.point, proposed) {
+    if !trace_segment_clear(request, cursor.point, proposed) {
         return Ok(None);
     }
     if trace_can_continue_from(request, proposed, cell_size_x, cell_size_y)? {
@@ -270,7 +276,7 @@ fn clear_continuable_step(
 
     let (row, col) = cell_for_point(proposed, cursor.rows, cursor.cols)?;
     let center = TracePoint::at_cell_center(row, col);
-    if !proposed.is_near(center) && finite_segment_clear(&request.distance, cursor.point, center) {
+    if !proposed.is_near(center) && trace_segment_clear(request, cursor.point, center) {
         return Ok(Some(center));
     }
     Ok(None)
@@ -284,7 +290,7 @@ fn trace_can_continue_from(
 ) -> Result<bool, PathTraceError> {
     let shape = request.distance.shape();
     let (row, col) = cell_for_point(point, shape[0], shape[1])?;
-    if !request.distance[[row, col]].is_finite() {
+    if !request.valid[[row, col]] || !request.distance[[row, col]].is_finite() {
         return Ok(false);
     }
     let Some(parent_point) = parent_trace_point(request, row, col)? else {
@@ -299,7 +305,7 @@ fn trace_can_continue_from(
     let degrees = request.back_direction[[row, col]];
     if degrees.is_finite() {
         if let Ok(proposed) = next_trace_step(&cursor, degrees, cell_size_x, cell_size_y) {
-            if finite_segment_clear(&request.distance, point, proposed) {
+            if trace_segment_clear(request, point, proposed) {
                 return Ok(true);
             }
         }
@@ -308,7 +314,7 @@ fn trace_can_continue_from(
     let Ok(parent_step) = next_trace_step_toward(&cursor, parent_point) else {
         return Ok(false);
     };
-    Ok(finite_segment_clear(&request.distance, point, parent_step))
+    Ok(trace_segment_clear(request, point, parent_step))
 }
 
 fn cell_for_point(
@@ -419,12 +425,8 @@ fn next_axis_crossing(value: f64, delta: f64) -> f64 {
     (target - value) / delta
 }
 
-fn finite_segment_clear(
-    distance: &ArrayView2<'_, f64>,
-    start: TracePoint,
-    end: TracePoint,
-) -> bool {
-    let shape = distance.shape();
+fn trace_segment_clear(request: &TraceRequest<'_>, start: TracePoint, end: TracePoint) -> bool {
+    let shape = request.distance.shape();
     grid_segment::segment_clear(
         shape[0],
         shape[1],
@@ -432,7 +434,7 @@ fn finite_segment_clear(
         start.col,
         end.row,
         end.col,
-        |row, col| distance[[row, col]].is_finite(),
+        |row, col| request.valid[[row, col]],
     )
 }
 

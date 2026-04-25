@@ -131,7 +131,11 @@ impl Solver {
         }
     }
 
-    pub(crate) fn solve(mut self, source_indices: &[usize]) -> PyResult<SolveOutput> {
+    pub(crate) fn solve(
+        mut self,
+        source_indices: &[usize],
+        target_indices: Option<&[usize]>,
+    ) -> PyResult<SolveOutput> {
         if source_indices.is_empty() {
             return Err(PyValueError::new_err(
                 "at least one source cell is required",
@@ -156,6 +160,17 @@ impl Solver {
             ));
         }
 
+        let (mut target_mask, mut remaining_targets) = self.target_mask(target_indices);
+        for &idx in &accepted_sources {
+            if !target_mask.is_empty() && target_mask[idx] {
+                target_mask[idx] = false;
+                remaining_targets -= 1;
+            }
+        }
+        if target_indices.is_some() && remaining_targets == 0 {
+            return Ok(self.into_output());
+        }
+
         for idx in accepted_sources {
             self.update_around_full(idx);
         }
@@ -169,14 +184,42 @@ impl Solver {
             }
 
             self.state[entry.idx] = ACCEPTED;
+            if !target_mask.is_empty() && target_mask[entry.idx] {
+                target_mask[entry.idx] = false;
+                remaining_targets -= 1;
+                if remaining_targets == 0 {
+                    break;
+                }
+            }
             self.update_around_incremental(entry.idx);
         }
 
-        Ok(SolveOutput {
+        Ok(self.into_output())
+    }
+
+    fn target_mask(&self, target_indices: Option<&[usize]>) -> (Vec<bool>, usize) {
+        let Some(target_indices) = target_indices else {
+            return (Vec::new(), 0);
+        };
+
+        let mut mask = vec![false; self.distance.len()];
+        let mut count = 0usize;
+        for &idx in target_indices {
+            if idx >= mask.len() || !self.is_valid(idx) || mask[idx] {
+                continue;
+            }
+            mask[idx] = true;
+            count += 1;
+        }
+        (mask, count)
+    }
+
+    fn into_output(self) -> SolveOutput {
+        SolveOutput {
             distance: self.distance,
             parent: self.parent,
             back_direction: self.back_direction,
-        })
+        }
     }
 
     pub(crate) fn rows(&self) -> usize {

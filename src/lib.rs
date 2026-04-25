@@ -84,7 +84,7 @@ mod tests {
             cell_size_y: 1.0,
         });
 
-        let output = solver.solve(&[2 * cols + 1]).unwrap();
+        let output = solver.solve(&[2 * cols + 1], None).unwrap();
 
         assert!(output.distance[2 * cols + 5] > 500.0);
     }

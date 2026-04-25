@@ -20,11 +20,13 @@ fn distance_accumulation<'py>(
     vertical_factor: &Bound<'py, PyDict>,
     cell_size_x: f64,
     cell_size_y: f64,
+    target_cells: Option<PyReadonlyArray2<'py, i64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let source_cells = source_cells.as_array();
     let cost_surface = cost_surface.as_array();
     let elevation = elevation.as_ref().map(|array| array.as_array());
     let barriers = barriers.as_ref().map(|array| array.as_array());
+    let target_cells = target_cells.as_ref().map(|array| array.as_array());
 
     let source_shape = source_cells.shape();
     if source_shape.len() != 2 || source_shape[1] != 2 {
@@ -115,6 +117,23 @@ fn distance_accumulation<'py>(
         sources_flat.push(row as usize * cols + col as usize);
     }
 
+    let mut targets_flat = Vec::new();
+    if let Some(target_cells) = target_cells {
+        let target_shape = target_cells.shape();
+        if target_shape.len() != 2 || target_shape[1] != 2 {
+            return Err(PyValueError::new_err("target_cells must have shape (n, 2)"));
+        }
+        targets_flat.reserve(target_shape[0]);
+        for target_index in 0..target_shape[0] {
+            let row = target_cells[[target_index, 0]];
+            let col = target_cells[[target_index, 1]];
+            if row < 0 || col < 0 || row >= rows as i64 || col >= cols as i64 {
+                return Err(PyValueError::new_err("target cell is outside the raster"));
+            }
+            targets_flat.push(row as usize * cols + col as usize);
+        }
+    }
+
     let solver = Solver::new(SolverInput {
         rows,
         cols,
@@ -127,7 +146,14 @@ fn distance_accumulation<'py>(
         cell_size_x,
         cell_size_y,
     });
-    let output = solver.solve(&sources_flat)?;
+    let output = solver.solve(
+        &sources_flat,
+        if targets_flat.is_empty() {
+            None
+        } else {
+            Some(&targets_flat)
+        },
+    )?;
 
     let parent_a: Vec<i64> = output.parent.iter().map(|parent| parent.a).collect();
     let parent_b: Vec<i64> = output.parent.iter().map(|parent| parent.b).collect();
@@ -172,6 +198,7 @@ fn distance_accumulation<'py>(
 fn optimal_path_as_line<'py>(
     py: Python<'py>,
     distance: PyReadonlyArray2<'py, f64>,
+    valid: PyReadonlyArray2<'py, bool>,
     back_direction: PyReadonlyArray2<'py, f64>,
     parent_a: PyReadonlyArray2<'py, i64>,
     parent_b: PyReadonlyArray2<'py, i64>,
@@ -186,6 +213,7 @@ fn optimal_path_as_line<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let coords = trace_optimal_path(TraceRequest {
         distance: distance.as_array(),
+        valid: valid.as_array(),
         back_direction: back_direction.as_array(),
         parent_a: parent_a.as_array(),
         parent_b: parent_b.as_array(),

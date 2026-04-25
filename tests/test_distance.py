@@ -107,6 +107,41 @@ def test_optimal_path_as_line_reaches_source() -> None:
     assert np.linalg.norm(line[-1] - np.array([7.0, 7.0])) <= math.sqrt(2)
 
 
+def test_target_limited_accumulation_traces_destination_path() -> None:
+    source = (7, 7)
+    destination = (12, 12)
+    cost = np.ones((31, 31), dtype=float)
+    full = distance_accumulation(cost, source=source)
+    limited = distance_accumulation(cost, source=source, target=destination)
+
+    assert limited.distance[destination] == pytest.approx(full.distance[destination])
+    assert np.count_nonzero(np.isfinite(limited.distance)) < np.count_nonzero(
+        np.isfinite(full.distance)
+    )
+
+    line = optimal_path_as_line(limited, destination)
+
+    assert line.shape[1] == 2
+    assert np.allclose(line[0], [destination[1], destination[0]])
+    assert np.linalg.norm(line[-1] - np.array([source[1], source[0]])) <= math.sqrt(2)
+
+
+def test_target_limited_accumulation_accepts_multiple_targets() -> None:
+    source = (10, 10)
+    targets = [(12, 12), (14, 10)]
+    cost = np.ones((31, 31), dtype=float)
+    full = distance_accumulation(cost, source=source)
+    limited = distance_accumulation(cost, source=source, target=targets)
+
+    for target in targets:
+        assert limited.distance[target] == pytest.approx(full.distance[target])
+
+
+def test_target_limited_accumulation_rejects_invalid_target_cell() -> None:
+    with pytest.raises(ValueError, match="target cell is outside"):
+        distance_accumulation(np.ones((3, 3), dtype=float), source=(1, 1), target=(3, 1))
+
+
 def test_optimal_path_as_line_traces_back_direction_without_zig_zag() -> None:
     source = (16, 55)
     destination = (94, 100)
