@@ -307,3 +307,36 @@ pub(crate) fn value_is_stale(value: f64, best: f64) -> bool {
 pub(crate) fn value_improves(value: f64, best: f64) -> bool {
     value < best - distance_tolerance(value, best)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BinaryHeap;
+
+    use super::{distance_tolerance, value_improves, value_is_stale, HeapEntry};
+
+    #[test]
+    fn heap_entry_ordering_is_total_for_nan_values() {
+        let mut heap = BinaryHeap::from([
+            HeapEntry {
+                value: f64::NAN,
+                idx: 0,
+            },
+            HeapEntry { value: 2.0, idx: 1 },
+            HeapEntry { value: 1.0, idx: 2 },
+        ]);
+
+        assert_eq!(heap.pop().unwrap().idx, 2);
+        assert_eq!(heap.pop().unwrap().idx, 1);
+        assert_eq!(heap.pop().unwrap().idx, 0);
+    }
+
+    #[test]
+    fn distance_tolerance_scales_with_accumulated_cost() {
+        assert_eq!(distance_tolerance(0.0, 0.0), 1.0e-12);
+        approx::assert_abs_diff_eq!(distance_tolerance(1.0e8, 1.0e8), 1.0e-4);
+        assert!(value_is_stale(1.0e8 + 2.0e-4, 1.0e8));
+        assert!(!value_is_stale(1.0e8 + 0.5e-4, 1.0e8));
+        assert!(value_improves(1.0e8 - 2.0e-4, 1.0e8));
+        assert!(!value_improves(1.0e8 - 0.5e-4, 1.0e8));
+    }
+}

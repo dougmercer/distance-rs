@@ -17,7 +17,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use crate::solver::{Solver, SolverInput};
-    use crate::vertical::VerticalFactor;
+    use crate::vertical::{VerticalFactor, VerticalFactorKind};
 
     fn flat_vf() -> VerticalFactor {
         VerticalFactor::none()
@@ -87,5 +87,64 @@ mod tests {
         let output = solver.solve(&[2 * cols + 1], None).unwrap();
 
         assert!(output.distance[2 * cols + 5] > 500.0);
+    }
+
+    #[test]
+    fn wide_binary_vertical_factor_scales_elevated_surface_distance() {
+        let rows = 9;
+        let cols = 9;
+        let cost = vec![1.0; rows * cols];
+        let valid = vec![true; rows * cols];
+        let elevation: Vec<f64> = (0..rows)
+            .flat_map(|row| {
+                (0..cols).map(move |col| {
+                    ((row as f64) * 0.7).sin() * 12.0 + ((col as f64) * 0.5).cos() * 8.0
+                })
+            })
+            .collect();
+
+        let base = Solver::new(SolverInput {
+            rows,
+            cols,
+            cost: cost.clone(),
+            elevation: elevation.clone(),
+            valid: valid.clone(),
+            has_blocked_cells: false,
+            has_elevation: true,
+            vf: flat_vf(),
+            cell_size_x: 1.0,
+            cell_size_y: 1.0,
+        })
+        .solve(&[4 * cols + 4], None)
+        .unwrap();
+
+        let binary = Solver::new(SolverInput {
+            rows,
+            cols,
+            cost,
+            elevation,
+            valid,
+            has_blocked_cells: false,
+            has_elevation: true,
+            vf: VerticalFactor::from_degrees(
+                VerticalFactorKind::Binary,
+                1.4,
+                -90.0,
+                90.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+            )
+            .unwrap(),
+            cell_size_x: 1.0,
+            cell_size_y: 1.0,
+        })
+        .solve(&[4 * cols + 4], None)
+        .unwrap();
+
+        for (scaled, base) in binary.distance.iter().zip(base.distance.iter()) {
+            approx::assert_abs_diff_eq!(*scaled, base * 1.4, epsilon = 1.0e-8);
+        }
     }
 }
