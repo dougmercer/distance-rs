@@ -513,7 +513,9 @@ impl Solver {
 
     fn consider_segment_candidate(&self, best: &mut BestCandidate, idx: usize, a: usize, b: usize) {
         if let Some((value, weight)) = self.segment_candidate(idx, a, b) {
-            best.consider(value, Parent::segment(a, b, weight));
+            let parent = endpoint_segment_parent(a, b, weight)
+                .map_or_else(|| Parent::segment(a, b, weight), Parent::point);
+            best.consider(value, parent);
         }
     }
 
@@ -646,15 +648,21 @@ impl Solver {
         }
         let a = parent.a as usize;
         if parent.b < 0 {
-            if let Some(back_direction) = self.cached_point_back_direction(idx, a) {
-                return Some(back_direction);
-            }
-            return self.back_direction_to_index(idx, a);
+            return self.point_back_direction(idx, a);
         }
 
         let b = parent.b as usize;
+        if let Some(endpoint) = endpoint_segment_parent(a, b, parent.weight) {
+            return self.point_back_direction(idx, endpoint);
+        }
+
         let context = SegmentContext::new(self, idx, a, b);
         self.segment_back_direction(&context, value, parent.weight)
+    }
+
+    fn point_back_direction(&self, idx: usize, target: usize) -> Option<f64> {
+        self.cached_point_back_direction(idx, target)
+            .or_else(|| self.back_direction_to_index(idx, target))
     }
 
     fn cached_point_back_direction(&self, idx: usize, target: usize) -> Option<f64> {
@@ -700,5 +708,15 @@ impl Solver {
 
     fn direction_from_delta(dx: f64, dy: f64) -> Option<f64> {
         direction_from_delta(dx, dy)
+    }
+}
+
+fn endpoint_segment_parent(a: usize, b: usize, weight_a: f64) -> Option<usize> {
+    if weight_a <= 0.0 {
+        Some(b)
+    } else if weight_a >= 1.0 {
+        Some(a)
+    } else {
+        None
     }
 }
