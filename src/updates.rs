@@ -72,9 +72,17 @@ struct SegmentContext<'a> {
     cost_idx: f64,
     distance_a: f64,
     distance_b: f64,
+    dx_base: f64,
+    dx_step: f64,
+    dy_base: f64,
+    dy_step: f64,
+    front_base: f64,
+    front_step: f64,
     elevation_idx: f64,
     elevation_a: f64,
     elevation_b: f64,
+    dz_base: f64,
+    dz_step: f64,
     barrier_bounds_clear: bool,
 }
 
@@ -91,6 +99,14 @@ impl<'a> SegmentContext<'a> {
             solver
                 .barriers
                 .cell_bounds_clear(&solver.grid, row_min, row_max, col_min, col_max);
+        let a_row = a_row as f64;
+        let a_col = a_col as f64;
+        let b_row = b_row as f64;
+        let b_col = b_col as f64;
+        let p_row = p_row as f64;
+        let p_col = p_col as f64;
+        let distance_a = solver.distance[a];
+        let distance_b = solver.distance[b];
         let (elevation_idx, elevation_a, elevation_b) = if solver.has_elevation {
             (
                 solver.elevation[idx],
@@ -103,52 +119,56 @@ impl<'a> SegmentContext<'a> {
         Self {
             solver,
             idx,
-            a_row: a_row as f64,
-            a_col: a_col as f64,
-            b_row: b_row as f64,
-            b_col: b_col as f64,
-            p_row: p_row as f64,
-            p_col: p_col as f64,
+            a_row,
+            a_col,
+            b_row,
+            b_col,
+            p_row,
+            p_col,
             cost_idx: solver.cost[idx],
-            distance_a: solver.distance[a],
-            distance_b: solver.distance[b],
+            distance_a,
+            distance_b,
+            dx_base: (p_col - b_col) * solver.grid.cell_size_x,
+            dx_step: -(a_col - b_col) * solver.grid.cell_size_x,
+            dy_base: (p_row - b_row) * solver.grid.cell_size_y,
+            dy_step: -(a_row - b_row) * solver.grid.cell_size_y,
+            front_base: distance_b,
+            front_step: distance_a - distance_b,
             elevation_idx,
             elevation_a,
             elevation_b,
+            dz_base: elevation_idx - elevation_b,
+            dz_step: -(elevation_a - elevation_b),
             barrier_bounds_clear,
         }
     }
 
     fn objective(&self, weight_a: f64) -> f64 {
-        let weight_b = 1.0 - weight_a;
-        let y_row = weight_a * self.a_row + weight_b * self.b_row;
-        let y_col = weight_a * self.a_col + weight_b * self.b_col;
-        if !self.barrier_bounds_clear
-            && !self
+        if !self.barrier_bounds_clear {
+            let weight_b = 1.0 - weight_a;
+            let y_row = weight_a * self.a_row + weight_b * self.b_row;
+            let y_col = weight_a * self.a_col + weight_b * self.b_col;
+            if !self
                 .solver
                 .segment_clear_coord_to_index(y_row, y_col, self.idx)
-        {
-            return f64::INFINITY;
+            {
+                return f64::INFINITY;
+            }
         }
 
-        let plan_distance = self
-            .solver
-            .physical_distance_coords(y_row, y_col, self.p_row, self.p_col);
+        let dx = self.dx_base + weight_a * self.dx_step;
+        let dy = self.dy_base + weight_a * self.dy_step;
+        let plan_distance = dx.hypot(dy);
         if plan_distance <= EPS {
             return f64::INFINITY;
         }
 
-        let front_value = weight_a * self.distance_a + weight_b * self.distance_b;
+        let front_value = self.front_base + weight_a * self.front_step;
         if self.solver.flat_cost_mode {
             return front_value + plan_distance * self.cost_idx;
         }
 
-        let y_elevation = weight_a * self.elevation_a + weight_b * self.elevation_b;
-        let dz = if self.solver.has_elevation {
-            self.elevation_idx - y_elevation
-        } else {
-            0.0
-        };
+        let dz = self.dz_base + weight_a * self.dz_step;
         let vf = self.solver.vf.factor_from_rise_run(plan_distance, dz);
         if !vf.is_finite() {
             return f64::INFINITY;

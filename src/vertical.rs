@@ -4,6 +4,8 @@ use pyo3::types::PyDict;
 use std::f64::consts::PI;
 
 const DEGREES_PER_RADIAN: f64 = 180.0 / PI;
+const HIKING_PACE_SCALE: f64 = 1.0 / 6000.0;
+const BIDIR_HIKING_PACE_SCALE: f64 = 1.0 / 12000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VerticalFactorKind {
@@ -173,9 +175,7 @@ impl VerticalFactor {
                 }
             }
             VerticalFactorKind::HikingTime => hiking_pace_from_slope(slope),
-            VerticalFactorKind::BidirHikingTime => {
-                0.5 * (hiking_pace_from_slope(slope) + hiking_pace_from_slope(-slope))
-            }
+            VerticalFactorKind::BidirHikingTime => bidir_hiking_pace_from_slope(slope),
         };
 
         finite_positive_or_infinite(factor)
@@ -224,7 +224,7 @@ impl VerticalFactor {
             VerticalFactorKind::HikingTime => hiking_pace_from_slope(angle_radians.tan()),
             VerticalFactorKind::BidirHikingTime => {
                 let slope = angle_radians.tan();
-                0.5 * (hiking_pace_from_slope(slope) + hiking_pace_from_slope(-slope))
+                bidir_hiking_pace_from_slope(slope)
             }
         };
 
@@ -297,8 +297,13 @@ pub(crate) fn hiking_pace(angle_degrees: f64) -> f64 {
 }
 
 fn hiking_pace_from_slope(slope: f64) -> f64 {
-    let speed_km_per_hour = 6.0 * (-3.5 * (slope + 0.05).abs()).exp();
-    1.0 / (speed_km_per_hour * 1000.0)
+    (3.5 * (slope + 0.05).abs()).exp() * HIKING_PACE_SCALE
+}
+
+fn bidir_hiking_pace_from_slope(slope: f64) -> f64 {
+    let forward = (3.5 * (slope + 0.05).abs()).exp();
+    let reverse = (3.5 * (0.05 - slope).abs()).exp();
+    (forward + reverse) * BIDIR_HIKING_PACE_SCALE
 }
 
 #[cfg(test)]
@@ -309,6 +314,17 @@ mod tests {
     #[test]
     fn hiking_pace_matches_esri_table_at_zero_degrees() {
         assert_abs_diff_eq!(hiking_pace(0.0), 0.000198541, epsilon = 1.0e-7);
+    }
+
+    #[test]
+    fn bidir_hiking_pace_matches_forward_reverse_average() {
+        for slope in [-2.0, -0.75, -0.05, 0.0, 0.1, 0.8, 2.0] {
+            assert_abs_diff_eq!(
+                bidir_hiking_pace_from_slope(slope),
+                0.5 * (hiking_pace_from_slope(slope) + hiking_pace_from_slope(-slope)),
+                epsilon = 1.0e-15
+            );
+        }
     }
 
     #[test]
