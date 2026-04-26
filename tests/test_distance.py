@@ -13,6 +13,7 @@ from distance_rs import (
     evaluate_path_cost,
     optimal_path_as_line,
     optimal_path_trace,
+    route_legs,
 )
 from distance_rs.baselines import (
     raster_dijkstra,
@@ -29,6 +30,32 @@ def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
     assert result.distance[10, 10] == 0.0
     assert result.distance[10, 15] == np.float64(5.0)
     assert math.isclose(result.distance[13, 14], 5.0, rel_tol=0.08)
+
+
+def test_route_legs_solves_multiple_legs_on_one_surface() -> None:
+    cost = np.ones((21, 21), dtype=float)
+    legs = np.array(
+        [
+            [10, 10, 10, 15],
+            [10, 10, 13, 14],
+        ],
+        dtype=np.int64,
+    )
+
+    solved = route_legs(cost, legs)
+
+    assert len(solved) == 2
+    assert solved[0].cost == pytest.approx(5.0)
+    assert solved[1].cost == pytest.approx(5.0, rel=0.08)
+    assert np.allclose(solved[0].line[0], [15.0, 10.0])
+    assert np.allclose(solved[0].line[-1], [10.0, 10.0])
+
+    shifted = route_legs(
+        RasterSurface(cost, grid=RasterGrid(origin=(100.0, 200.0))),
+        legs[:1],
+    )
+    assert np.allclose(shifted[0].line[0], [115.0, 210.0])
+    assert np.allclose(shifted[0].line[-1], [110.0, 210.0])
 
 
 def test_cost_accumulation_uses_target_cell_cost_for_local_slope() -> None:

@@ -145,6 +145,7 @@ def main(argv: list[str] | None = None) -> None:
         margin=args.crop_buffer,
         vertical_factor=VERTICAL_FACTOR,
         baseline_speed=args.baseline_speed,
+        parallel=True,
     )
     dijkstra_route = run_raster_dijkstra_route(
         land_use_path,

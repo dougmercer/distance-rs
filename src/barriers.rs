@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use crate::grid::Grid;
 use crate::grid_segment;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BarrierMask {
-    valid: Vec<bool>,
-    blocked_prefix: Vec<usize>,
+    valid: Arc<[bool]>,
+    blocked_prefix: Arc<[usize]>,
     has_blocked_cells: bool,
 }
 
@@ -19,13 +21,13 @@ impl BarrierMask {
             connect_diagonal_barriers(rows, cols, &mut valid);
         }
         let has_blocked_cells = valid.iter().any(|cell| !*cell);
-        let blocked_prefix = if has_blocked_cells {
-            build_blocked_prefix(rows, cols, &valid)
+        let blocked_prefix: Arc<[usize]> = if has_blocked_cells {
+            build_blocked_prefix(rows, cols, &valid).into()
         } else {
-            Vec::new()
+            Arc::from([])
         };
         Self {
-            valid,
+            valid: valid.into(),
             blocked_prefix,
             has_blocked_cells,
         }
@@ -47,6 +49,10 @@ impl BarrierMask {
             return true;
         }
         self.blocked_count_in(grid, row_min, row_max, col_min, col_max) == 0
+    }
+
+    pub(crate) fn valid(&self) -> &[bool] {
+        &self.valid
     }
 
     pub(crate) fn segment_clear_index_to_index_with_crossings(
