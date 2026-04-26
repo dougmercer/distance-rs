@@ -449,7 +449,7 @@ def route_legs(
     """Solve independent source/destination legs on one shared raster surface.
 
     `legs` must have shape `(n, 4)` with columns
-    `(source_row, source_col, target_row, target_col)`. The native
+    `(source_row, source_col, destination_row, destination_col)`. The native
     implementation shares immutable raster layers across worker threads and
     uses Rayon to solve each leg in parallel.
     """
@@ -501,7 +501,7 @@ def route_legs_windowed(
     """Solve independent route legs using copied per-leg windows.
 
     `leg_windows` must have shape `(n, 8)` with columns
-    `(source_row, source_col, target_row, target_col, row_min, row_max,
+    `(source_row, source_col, destination_row, destination_col, row_min, row_max,
     col_min, col_max)`, where bounds are exclusive. The native implementation
     shares the full input raster, copies each window inside a Rayon worker, and
     solves only that local crop.
@@ -682,7 +682,7 @@ def _normalize_leg_cells(
     cells_float = np.asarray(value, dtype=np.float64)
     if cells_float.ndim != 2 or cells_float.shape[1] != 4:
         raise ValueError(
-            "legs must have shape (n, 4): source_row, source_col, target_row, target_col"
+            "legs must have shape (n, 4): source_row, source_col, destination_row, destination_col"
         )
     if cells_float.shape[0] == 0:
         raise ValueError("at least one route leg is required")
@@ -713,8 +713,8 @@ def _normalize_leg_windows(
     windows_float = np.asarray(value, dtype=np.float64)
     if windows_float.ndim != 2 or windows_float.shape[1] != 8:
         raise ValueError(
-            "leg_windows must have shape (n, 8): source_row, source_col, target_row, "
-            "target_col, row_min, row_max, col_min, col_max"
+            "leg_windows must have shape (n, 8): source_row, source_col, "
+            "destination_row, destination_col, row_min, row_max, col_min, col_max"
         )
     if windows_float.shape[0] == 0:
         raise ValueError("at least one route leg window is required")

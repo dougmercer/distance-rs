@@ -19,7 +19,7 @@ struct NativeRouteLeg {
 #[derive(Clone, Copy)]
 struct NativeRouteLegWindow {
     source: usize,
-    target: usize,
+    destination: usize,
     row_min: usize,
     row_max: usize,
     col_min: usize,
@@ -192,7 +192,7 @@ fn route_legs<'py>(
     let leg_shape = leg_cells.shape();
     if leg_shape.len() != 2 || leg_shape[1] != 4 {
         return Err(PyValueError::new_err(
-            "leg_cells must have shape (n, 4): source_row, source_col, target_row, target_col",
+            "leg_cells must have shape (n, 4): source_row, source_col, destination_row, destination_col",
         ));
     }
 
@@ -233,11 +233,11 @@ fn route_legs<'py>(
     for leg_index in 0..leg_shape[0] {
         let source_row = leg_cells[[leg_index, 0]];
         let source_col = leg_cells[[leg_index, 1]];
-        let target_row = leg_cells[[leg_index, 2]];
-        let target_col = leg_cells[[leg_index, 3]];
+        let destination_row = leg_cells[[leg_index, 2]];
+        let destination_col = leg_cells[[leg_index, 3]];
         for (row, col, name) in [
             (source_row, source_col, "source"),
-            (target_row, target_col, "target"),
+            (destination_row, destination_col, "destination"),
         ] {
             if row < 0 || col < 0 || row >= rows as i64 || col >= cols as i64 {
                 return Err(PyValueError::new_err(format!(
@@ -247,7 +247,7 @@ fn route_legs<'py>(
         }
         legs.push((
             source_row as usize * cols + source_col as usize,
-            target_row as usize * cols + target_col as usize,
+            destination_row as usize * cols + destination_col as usize,
         ));
     }
 
@@ -300,8 +300,8 @@ fn route_legs_windowed<'py>(
     let window_shape = leg_windows.shape();
     if window_shape.len() != 2 || window_shape[1] != 8 {
         return Err(PyValueError::new_err(
-            "leg_windows must have shape (n, 8): source_row, source_col, target_row, \
-             target_col, row_min, row_max, col_min, col_max",
+            "leg_windows must have shape (n, 8): source_row, source_col, destination_row, \
+             destination_col, row_min, row_max, col_min, col_max",
         ));
     }
 
@@ -342,8 +342,8 @@ fn route_legs_windowed<'py>(
     for leg_index in 0..window_shape[0] {
         let source_row = leg_windows[[leg_index, 0]];
         let source_col = leg_windows[[leg_index, 1]];
-        let target_row = leg_windows[[leg_index, 2]];
-        let target_col = leg_windows[[leg_index, 3]];
+        let destination_row = leg_windows[[leg_index, 2]];
+        let destination_col = leg_windows[[leg_index, 3]];
         let row_min = leg_windows[[leg_index, 4]];
         let row_max = leg_windows[[leg_index, 5]];
         let col_min = leg_windows[[leg_index, 6]];
@@ -362,7 +362,7 @@ fn route_legs_windowed<'py>(
         }
         for (row, col, name) in [
             (source_row, source_col, "source"),
-            (target_row, target_col, "target"),
+            (destination_row, destination_col, "destination"),
         ] {
             if row < row_min || col < col_min || row >= row_max || col >= col_max {
                 return Err(PyValueError::new_err(format!(
@@ -373,7 +373,7 @@ fn route_legs_windowed<'py>(
 
         windows.push(NativeRouteLegWindow {
             source: source_row as usize * cols + source_col as usize,
-            target: target_row as usize * cols + target_col as usize,
+            destination: destination_row as usize * cols + destination_col as usize,
             row_min: row_min as usize,
             row_max: row_max as usize,
             col_min: col_min as usize,
@@ -522,8 +522,8 @@ fn solve_route_leg(
         parent_a,
         parent_b,
         parent_weight,
-        start_row: (target / cols) as isize,
-        start_col: (target % cols) as isize,
+        destination_row: (target / cols) as isize,
+        destination_col: (target % cols) as isize,
         cell_size_x,
         cell_size_y,
         origin_x: 0.0,
@@ -577,10 +577,10 @@ fn solve_route_leg_window(
 
     let source_row = window.source / shared_input.cols - window.row_min;
     let source_col = window.source % shared_input.cols - window.col_min;
-    let target_row = window.target / shared_input.cols - window.row_min;
-    let target_col = window.target % shared_input.cols - window.col_min;
+    let destination_row = window.destination / shared_input.cols - window.row_min;
+    let destination_col = window.destination % shared_input.cols - window.col_min;
     let source = source_row * window_cols + source_col;
-    let target = target_row * window_cols + target_col;
+    let target = destination_row * window_cols + destination_col;
     let trace_valid = valid.clone();
     let solver = Solver::new(SolverInput {
         rows: window_rows,
@@ -649,8 +649,8 @@ fn solve_route_leg_from_solver(
         parent_a,
         parent_b,
         parent_weight,
-        start_row: (target / cols) as isize,
-        start_col: (target % cols) as isize,
+        destination_row: (target / cols) as isize,
+        destination_col: (target % cols) as isize,
         cell_size_x,
         cell_size_y,
         origin_x: 0.0,
@@ -709,8 +709,8 @@ fn optimal_path_as_line<'py>(
     parent_a: PyReadonlyArray2<'py, i64>,
     parent_b: PyReadonlyArray2<'py, i64>,
     parent_weight: PyReadonlyArray2<'py, f64>,
-    start_row: isize,
-    start_col: isize,
+    destination_row: isize,
+    destination_col: isize,
     cell_size_x: f64,
     cell_size_y: f64,
     origin_x: f64,
@@ -724,8 +724,8 @@ fn optimal_path_as_line<'py>(
         parent_a: parent_a.as_array(),
         parent_b: parent_b.as_array(),
         parent_weight: parent_weight.as_array(),
-        start_row,
-        start_col,
+        destination_row,
+        destination_col,
         cell_size_x,
         cell_size_y,
         origin_x,
@@ -751,8 +751,8 @@ fn optimal_path_trace<'py>(
     parent_a: PyReadonlyArray2<'py, i64>,
     parent_b: PyReadonlyArray2<'py, i64>,
     parent_weight: PyReadonlyArray2<'py, f64>,
-    start_row: isize,
-    start_col: isize,
+    destination_row: isize,
+    destination_col: isize,
     cell_size_x: f64,
     cell_size_y: f64,
     origin_x: f64,
@@ -766,8 +766,8 @@ fn optimal_path_trace<'py>(
         parent_a: parent_a.as_array(),
         parent_b: parent_b.as_array(),
         parent_weight: parent_weight.as_array(),
-        start_row,
-        start_col,
+        destination_row,
+        destination_col,
         cell_size_x,
         cell_size_y,
         origin_x,

@@ -15,8 +15,8 @@ pub(crate) struct TraceRequest<'a> {
     pub(crate) parent_a: ArrayView2<'a, i64>,
     pub(crate) parent_b: ArrayView2<'a, i64>,
     pub(crate) parent_weight: ArrayView2<'a, f64>,
-    pub(crate) start_row: isize,
-    pub(crate) start_col: isize,
+    pub(crate) destination_row: isize,
+    pub(crate) destination_col: isize,
     pub(crate) cell_size_x: f64,
     pub(crate) cell_size_y: f64,
     pub(crate) origin_x: f64,
@@ -112,18 +112,24 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<TraceOutpu
             "valid, direction, and parent arrays must match distance shape".to_string(),
         ));
     }
-    if request.start_row < 0
-        || request.start_col < 0
-        || request.start_row >= rows as isize
-        || request.start_col >= cols as isize
+    if request.destination_row < 0
+        || request.destination_col < 0
+        || request.destination_row >= rows as isize
+        || request.destination_col >= cols as isize
     {
         return Err(PathTraceError::Value(
             "destination is outside the raster".to_string(),
         ));
     }
 
-    if !request.valid[[request.start_row as usize, request.start_col as usize]]
-        || !request.distance[[request.start_row as usize, request.start_col as usize]].is_finite()
+    if !request.valid[[
+        request.destination_row as usize,
+        request.destination_col as usize,
+    ]] || !request.distance[[
+        request.destination_row as usize,
+        request.destination_col as usize,
+    ]]
+    .is_finite()
     {
         return Err(PathTraceError::Value(
             "destination has no finite accumulated distance".to_string(),
@@ -136,7 +142,7 @@ pub(crate) fn trace_optimal_path(request: TraceRequest<'_>) -> Result<TraceOutpu
         request.max_steps
     };
     let mut coords = Vec::with_capacity(step_limit.min(1024) * 2);
-    let mut cursor = TraceCursor::new(request.start_row, request.start_col, rows, cols);
+    let mut cursor = TraceCursor::new(request.destination_row, request.destination_col, rows, cols);
     let mut segment_crossings = Vec::new();
     let mut metadata = TraceMetadata::default();
     let mut guard = 0usize;

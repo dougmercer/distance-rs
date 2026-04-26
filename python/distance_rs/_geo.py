@@ -222,12 +222,12 @@ def load_surface(
     grid_spec = grid or GridSpec()
 
     with rio.open(cost_spec.path) as cost_src:
-        target = _target_crs(cost_src, grid_spec.crs, name="cost raster")
+        target_crs = _target_crs(cost_src, grid_spec.crs, name="cost raster")
         cell_size = _target_resolution(cost_src, grid_spec.resolution)
         base_bounds = _target_bounds(
             cost_src,
             elevation_path=Path(elevation) if elevation is not None else None,
-            target_crs=target,
+            target_crs=target_crs,
         )
         target_bounds = (
             _restrict_bounds_to_grid(grid_spec.bounds, base_bounds, cell_size)
@@ -238,7 +238,7 @@ def load_surface(
         land_use = _read_to_grid(
             cost_src,
             transform=transform,
-            crs=target,
+            crs=target_crs,
             width=width,
             height=height,
             resampling=cost_spec.resampling,
@@ -250,7 +250,7 @@ def load_surface(
             elevation_arr = _read_to_grid(
                 elevation_src,
                 transform=transform,
-                crs=target,
+                crs=target_crs,
                 width=width,
                 height=height,
                 resampling=elevation_resampling,
@@ -268,7 +268,7 @@ def load_surface(
         barrier_mask |= _load_barrier_mask(
             barriers,
             transform=transform,
-            crs=target,
+            crs=target_crs,
             shape=(height, width),
         )
     barrier_mask = _edge_connect_barriers(barrier_mask)
@@ -277,7 +277,7 @@ def load_surface(
     geo_grid = GeoGrid(
         shape=(height, width),
         transform=transform,
-        crs=target,
+        crs=target_crs,
         bounds=adjusted_bounds,
         cell_size=cell_size,
     )
@@ -313,12 +313,12 @@ def route_path(
     cost_spec = _cost_spec(cost)
     grid_spec = grid or GridSpec()
     with rio.open(cost_spec.path) as cost_src:
-        target = _target_crs(cost_src, grid_spec.crs, name="cost raster")
+        target_crs = _target_crs(cost_src, grid_spec.crs, name="cost raster")
 
-    if getattr(target, "is_geographic", False):
+    if getattr(target_crs, "is_geographic", False):
         raise ValueError("route_path expects a projected target CRS with meter-like units")
 
-    waypoint_xy = load_points(waypoints, target_crs=target)
+    waypoint_xy = load_points(waypoints, target_crs=target_crs)
     if len(waypoint_xy) < 2:
         raise ValueError("at least two waypoints are required")
 
@@ -327,7 +327,7 @@ def route_path(
         return _route_path_parallel(
             cost_spec,
             waypoint_xy,
-            target=target,
+            target_crs=target_crs,
             elevation=elevation,
             elevation_resampling=elevation_resampling,
             barriers=barriers,
@@ -343,7 +343,7 @@ def route_path(
     total_metrics: PathMetrics | None = None
 
     for index, (start_xy, end_xy) in enumerate(zip(waypoint_xy, waypoint_xy[1:])):
-        leg_grid = _leg_grid_spec(grid_spec, target, start_xy, end_xy, margin=margin)
+        leg_grid = _leg_grid_spec(grid_spec, target_crs, start_xy, end_xy, margin=margin)
         geo = load_surface(
             cost_spec,
             elevation=elevation,
@@ -404,7 +404,7 @@ def route_path(
         path_xy=full_path,
         legs=tuple(legs),
         waypoint_xy=waypoint_xy,
-        crs=target,
+        crs=target_crs,
         metrics=total_metrics,
     )
 
@@ -413,7 +413,7 @@ def _route_path_parallel(
     cost_spec: CostRaster,
     waypoint_xy: tuple[XY, ...],
     *,
-    target: Any,
+    target_crs: Any,
     elevation: str | Path | None,
     elevation_resampling: str | Any,
     barriers: Any | None,
@@ -423,7 +423,7 @@ def _route_path_parallel(
     baseline_speed_value: float,
     compute_metrics: bool,
 ) -> OptimalPathResult:
-    route_grid = _route_grid_spec(grid_spec, target, waypoint_xy, margin=margin)
+    route_grid = _route_grid_spec(grid_spec, target_crs, waypoint_xy, margin=margin)
     geo = load_surface(
         cost_spec,
         elevation=elevation,
@@ -498,7 +498,7 @@ def _route_path_parallel(
         path_xy=full_path,
         legs=tuple(legs),
         waypoint_xy=waypoint_xy,
-        crs=target,
+        crs=target_crs,
         metrics=total_metrics,
     )
 
