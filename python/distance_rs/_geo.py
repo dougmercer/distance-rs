@@ -7,12 +7,13 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import fiona
 import numpy as np
 import numpy.typing as npt
 import rasterio as rio
+from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
 from rasterio.transform import from_origin, rowcol, xy
@@ -204,7 +205,7 @@ class OptimalPathResult:
 def load_points(points: Any, *, target_crs: Any) -> tuple[XY, ...]:
     """Load waypoint coordinates and reproject them to `target_crs`."""
 
-    target = rio.crs.CRS.from_user_input(target_crs)
+    target = CRS.from_user_input(target_crs)
     return tuple(_load_point_xy(points, target_crs=target))
 
 
@@ -540,7 +541,7 @@ def _target_crs(dataset: Any, crs: Any | None, *, name: str) -> Any:
     target_input = crs or dataset.crs
     if target_input is None:
         raise ValueError(f"{name} has no CRS; pass GridSpec(crs=...)")
-    return rio.crs.CRS.from_user_input(target_input)
+    return CRS.from_user_input(target_input)
 
 
 def _leg_grid_spec(
@@ -616,9 +617,11 @@ def _leg_window(
 
 def _validate_endpoint(geo: GeoSurface, cell: Cell, name: str) -> None:
     row, col = cell
-    if geo.surface.barriers is not None and bool(geo.surface.barriers[row, col]):
+    barriers = None if geo.surface.barriers is None else np.asarray(geo.surface.barriers)
+    if barriers is not None and bool(barriers[row, col]):
         raise ValueError(f"{name} cell {cell} is blocked")
-    if not math.isfinite(float(np.asarray(geo.surface.cost)[row, col])):
+    cost = np.asarray(geo.surface.cost, dtype=np.float64)
+    if not math.isfinite(float(cost[row, col])):
         raise ValueError(f"{name} cell {cell} has no finite cost")
 
 
@@ -696,9 +699,10 @@ def _segment_plan_distances(path_xy: npt.NDArray[np.float64]) -> npt.NDArray[np.
 
 
 def _sample_elevation(path_xy: npt.NDArray[np.float64], geo: GeoSurface) -> npt.NDArray[np.float64]:
-    elevation = geo.surface.elevation
-    if elevation is None:
+    elevation_like = geo.surface.elevation
+    if elevation_like is None:
         return np.full(len(path_xy), np.nan, dtype=np.float64)
+    elevation = np.asarray(elevation_like, dtype=np.float64)
     rows, cols = rowcol(
         geo.grid.transform,
         path_xy[:, 0].tolist(),
@@ -943,6 +947,7 @@ def _load_barrier_mask(
         all_touched=wrapped.all_touched,
         dtype=np.uint8,
     )
+    assert burned is not None
     return burned.astype(np.bool_)
 
 
@@ -1009,7 +1014,7 @@ def _load_geometries(
             raise ValueError(
                 "geometry barriers without file metadata require GeoBarriers(..., crs=...)"
             )
-        geometries = [value.__geo_interface__]
+        geometries = [_geometry_mapping(value.__geo_interface__)]
         geometry_crs = source_crs
     elif _is_sequence_of_inputs(value):
         geometries = []
@@ -1029,11 +1034,11 @@ def _load_geometries(
     if not geometries:
         return []
 
-    resolved_source_crs = rio.crs.CRS.from_user_input(geometry_crs)
+    resolved_source_crs = CRS.from_user_input(geometry_crs)
     if resolved_source_crs == target_crs:
         return geometries
     return [
-        transform_geom(resolved_source_crs, target_crs, geometry)  # type: ignore[arg-type]
+        _geometry_mapping(transform_geom(resolved_source_crs, target_crs, geometry))
         for geometry in geometries
     ]
 
@@ -1069,12 +1074,15 @@ def _load_point_xy(points: Any, *, target_crs: Any) -> list[XY]:
         return []
     if geometry_crs is None:
         raise ValueError("waypoint input has no CRS; pass GeoPoints(..., crs=...)")
-    source_crs = rio.crs.CRS.from_user_input(geometry_crs)
+    source_crs = CRS.from_user_input(geometry_crs)
     if source_crs == target_crs:
         return [(float(x_coord), float(y_coord)) for x_coord, y_coord in coords]
 
     xs, ys = zip(*coords)
-    out_xs, out_ys = transform_coords(source_crs, target_crs, xs, ys)
+    out_xs, out_ys = cast(
+        tuple[Sequence[float], Sequence[float]],
+        transform_coords(source_crs, target_crs, xs, ys),
+    )
     return [(float(x_coord), float(y_coord)) for x_coord, y_coord in zip(out_xs, out_ys)]
 
 
@@ -1097,13 +1105,26 @@ def _geojson_crs(data: Mapping[str, Any]) -> Any | None:
 def _read_vector_file(
     path: Path, *, layer: str | int | None
 ) -> tuple[list[Mapping[str, Any]], Any]:
-    open_kwargs = {"layer": layer} if layer is not None else {}
-    with fiona.open(path, **open_kwargs) as collection:
+    if layer is None:
+        collection_context = fiona.open(path)
+    else:
+        collection_context = fiona.open(path, layer=layer)
+    with collection_context as collection:
         crs = collection.crs_wkt or collection.crs
-        geometries = [feature["geometry"] for feature in collection if feature.get("geometry")]
+        geometries = []
+        for feature in collection:
+            geometry = feature.get("geometry")
+            if geometry:
+                geometries.append(_geometry_mapping(geometry))
     if crs is None:
         raise ValueError(f"{path} has no CRS")
     return geometries, crs
+
+
+def _geometry_mapping(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"expected GeoJSON-like geometry mapping, got {type(value).__name__}")
+    return value
 
 
 def _geometries_from_geometry(geometry: Mapping[str, Any]) -> list[Mapping[str, Any]]:

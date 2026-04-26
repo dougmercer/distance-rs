@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence, TypeGuard, cast, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -179,6 +179,17 @@ _DEFAULTS: dict[str, dict[str, float]] = {
 }
 
 
+class _ResolvedVerticalFactor(Protocol):
+    type: str
+    zero_factor: float
+    low_cut_angle: float
+    high_cut_angle: float
+    slope: float
+    power: float
+    cos_power: float
+    sec_power: float
+
+
 @dataclass(frozen=True)
 class VerticalFactor:
     """Vertical cost factor specification."""
@@ -239,7 +250,7 @@ class VerticalFactor:
         }
 
     def factor(self, angle_degrees: float) -> float:
-        vf = self if self._is_resolved() else self.normalized()
+        vf = cast(_ResolvedVerticalFactor, self if self._is_resolved() else self.normalized())
         if vf.type == "none":
             return 1.0
         if (
@@ -344,17 +355,49 @@ class DistanceAccumulationResult:
     origin: tuple[float, float]
     vertical_factor: VerticalFactor
 
+    @overload
     def optimal_path_as_line(
         self,
-        destination: tuple[int, int] | Sequence[tuple[int, int]],
+        destination: Cell,
+        *,
+        max_steps: int | None = None,
+    ) -> npt.NDArray[np.float64]: ...
+
+    @overload
+    def optimal_path_as_line(
+        self,
+        destination: Sequence[Cell],
+        *,
+        max_steps: int | None = None,
+    ) -> list[npt.NDArray[np.float64]]: ...
+
+    def optimal_path_as_line(
+        self,
+        destination: Cell | Sequence[Cell],
         *,
         max_steps: int | None = None,
     ) -> npt.NDArray[np.float64] | list[npt.NDArray[np.float64]]:
         return optimal_path_as_line(self, destination, max_steps=max_steps)
 
+    @overload
     def optimal_path_trace(
         self,
-        destination: tuple[int, int] | Sequence[tuple[int, int]],
+        destination: Cell,
+        *,
+        max_steps: int | None = None,
+    ) -> PathTraceResult: ...
+
+    @overload
+    def optimal_path_trace(
+        self,
+        destination: Sequence[Cell],
+        *,
+        max_steps: int | None = None,
+    ) -> list[PathTraceResult]: ...
+
+    def optimal_path_trace(
+        self,
+        destination: Cell | Sequence[Cell],
         *,
         max_steps: int | None = None,
     ) -> PathTraceResult | list[PathTraceResult]:
@@ -937,9 +980,27 @@ def _line_point_cell(
     return int(row), int(col)
 
 
+@overload
 def optimal_path_as_line(
     result: DistanceAccumulationResult,
-    destination: tuple[int, int] | Sequence[tuple[int, int]],
+    destination: Cell,
+    *,
+    max_steps: int | None = None,
+) -> npt.NDArray[np.float64]: ...
+
+
+@overload
+def optimal_path_as_line(
+    result: DistanceAccumulationResult,
+    destination: Sequence[Cell],
+    *,
+    max_steps: int | None = None,
+) -> list[npt.NDArray[np.float64]]: ...
+
+
+def optimal_path_as_line(
+    result: DistanceAccumulationResult,
+    destination: Cell | Sequence[Cell],
     *,
     max_steps: int | None = None,
 ) -> npt.NDArray[np.float64] | list[npt.NDArray[np.float64]]:
@@ -949,7 +1010,7 @@ def optimal_path_as_line(
         raise TypeError("result must be a DistanceAccumulationResult")
 
     if _is_one_destination(destination):
-        row, col = destination  # type: ignore[misc]
+        row, col = destination
         max_steps_value = _normalize_max_steps(max_steps)
         return _native.optimal_path_as_line(
             result.distance,
@@ -967,15 +1028,34 @@ def optimal_path_as_line(
             max_steps_value,
         )
 
+    destinations = cast(Sequence[Cell], destination)
     return [
         optimal_path_as_line(result, one_destination, max_steps=max_steps)
-        for one_destination in destination  # type: ignore[union-attr]
+        for one_destination in destinations
     ]
+
+
+@overload
+def optimal_path_trace(
+    result: DistanceAccumulationResult,
+    destination: Cell,
+    *,
+    max_steps: int | None = None,
+) -> PathTraceResult: ...
+
+
+@overload
+def optimal_path_trace(
+    result: DistanceAccumulationResult,
+    destination: Sequence[Cell],
+    *,
+    max_steps: int | None = None,
+) -> list[PathTraceResult]: ...
 
 
 def optimal_path_trace(
     result: DistanceAccumulationResult,
-    destination: tuple[int, int] | Sequence[tuple[int, int]],
+    destination: Cell | Sequence[Cell],
     *,
     max_steps: int | None = None,
 ) -> PathTraceResult | list[PathTraceResult]:
@@ -995,7 +1075,7 @@ def optimal_path_trace(
         raise TypeError("result must be a DistanceAccumulationResult")
 
     if _is_one_destination(destination):
-        row, col = destination  # type: ignore[misc]
+        row, col = destination
         max_steps_value = _normalize_max_steps(max_steps)
         raw = _native.optimal_path_trace(
             result.distance,
@@ -1017,9 +1097,10 @@ def optimal_path_trace(
             metadata={key: int(value) for key, value in raw["metadata"].items()},
         )
 
+    destinations = cast(Sequence[Cell], destination)
     return [
         optimal_path_trace(result, one_destination, max_steps=max_steps)
-        for one_destination in destination  # type: ignore[union-attr]
+        for one_destination in destinations
     ]
 
 
@@ -1060,7 +1141,7 @@ def _normalize_max_steps(max_steps: int | None) -> int:
     return value
 
 
-def _is_one_destination(value: object) -> bool:
+def _is_one_destination(value: object) -> TypeGuard[Cell]:
     if not isinstance(value, Sequence) or len(value) != 2:  # type: ignore[arg-type]
         return False
     first = value[0]  # type: ignore[index]
