@@ -1,4 +1,5 @@
 use crate::grid::{direction_from_delta, EPS, NEIGHBORS_8};
+use crate::math::fast_hypot;
 use crate::solver::{value_improves, Parent, Solver, TRIAL};
 use crate::vertical::VerticalFactorKind;
 
@@ -158,7 +159,7 @@ impl<'a> SegmentContext<'a> {
 
         let dx = self.dx_base + weight_a * self.dx_step;
         let dy = self.dy_base + weight_a * self.dy_step;
-        let plan_distance = dx.hypot(dy);
+        let plan_distance = fast_hypot(dx, dy);
         if plan_distance <= EPS {
             return f64::INFINITY;
         }
@@ -675,7 +676,7 @@ impl Solver {
 
     fn surface_distance(&self, plan_distance: f64, dz: f64) -> f64 {
         if self.has_elevation {
-            plan_distance.hypot(dz)
+            fast_hypot(plan_distance, dz)
         } else {
             plan_distance
         }

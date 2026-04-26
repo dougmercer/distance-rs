@@ -3,6 +3,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::f64::consts::PI;
 
+use crate::math::fast_hypot;
+
 const DEGREES_PER_RADIAN: f64 = 180.0 / PI;
 const HIKING_PACE_SCALE: f64 = 1.0 / 6000.0;
 const BIDIR_HIKING_PACE_SCALE: f64 = 1.0 / 12000.0;
@@ -284,11 +286,11 @@ fn sec_factor(angle_radians: f64, power: f64) -> f64 {
 }
 
 fn cos_factor_from_slope(slope: f64, power: f64) -> f64 {
-    slope.hypot(1.0).recip().powf(power)
+    fast_hypot(slope, 1.0).recip().powf(power)
 }
 
 fn sec_factor_from_slope(slope: f64, power: f64) -> f64 {
-    slope.hypot(1.0).powf(power)
+    fast_hypot(slope, 1.0).powf(power)
 }
 
 #[cfg(test)]

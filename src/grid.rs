@@ -2,6 +2,8 @@ pub(crate) const MIN_COST: f64 = 1.0e-12;
 pub(crate) const EPS: f64 = 1.0e-12;
 pub(crate) const GRID_EPS: f64 = 1.0e-9;
 
+use crate::math::fast_hypot;
+
 pub(crate) const NEIGHBORS_8: [(isize, isize); 8] = [
     (-1, -1),
     (-1, 0),
@@ -40,7 +42,7 @@ impl Grid {
                 stencil_offsets.push(StencilOffset {
                     dr,
                     dc,
-                    distance: dx.hypot(dy),
+                    distance: fast_hypot(dx, dy),
                     back_direction: direction_from_delta(dx, dy),
                 });
             }
@@ -70,7 +72,10 @@ impl Grid {
         row1: f64,
         col1: f64,
     ) -> f64 {
-        ((col1 - col0) * self.cell_size_x).hypot((row1 - row0) * self.cell_size_y)
+        fast_hypot(
+            (col1 - col0) * self.cell_size_x,
+            (row1 - row0) * self.cell_size_y,
+        )
     }
 
     pub(crate) fn offset_idx(
