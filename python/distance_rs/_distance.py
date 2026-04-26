@@ -355,7 +355,7 @@ def distance_accumulation(
     *,
     target: Cell | Sequence[Cell] | npt.ArrayLike | None = None,
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
-    progress: ProgressOption = True,
+    progress: ProgressOption = False,
     progress_interval: int | None = None,
 ) -> DistanceAccumulationResult:
     """Compute accumulated cost distance from one or more source cells.

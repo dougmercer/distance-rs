@@ -8,6 +8,10 @@ const GOLDEN_SECTION_MIN_ITERATIONS: usize = 6;
 const GOLDEN_SECTION_WEIGHT_TOL: f64 = 1.0e-3;
 const GOLDEN_SECTION_VALUE_TOL_ABS: f64 = 1.0e-12;
 const GOLDEN_SECTION_VALUE_TOL_REL: f64 = 1.0e-10;
+const BRENT_MAX_ITERATIONS: usize = 14;
+const BRENT_CGOLD: f64 = 0.381_966_011_250_105_1;
+const BRENT_WEIGHT_TOL: f64 = 5.0e-4;
+const BRENT_ZEPS: f64 = 1.0e-12;
 
 #[derive(Clone, Copy, Debug)]
 struct CandidateUpdate {
@@ -215,6 +219,119 @@ impl<'a> SegmentContext<'a> {
         } else {
             None
         }
+    }
+
+    fn brent_minimize(
+        &self,
+        mut lo: f64,
+        initial_weight: f64,
+        mut hi: f64,
+        initial_value: f64,
+    ) -> Option<(f64, f64)> {
+        if !initial_value.is_finite() || lo >= hi {
+            return None;
+        }
+
+        let mut x = initial_weight.clamp(lo, hi);
+        let mut w = x;
+        let mut v = x;
+        let mut fx = initial_value;
+        let mut fw = initial_value;
+        let mut fv = initial_value;
+        let mut d = 0.0_f64;
+        let mut e = 0.0_f64;
+
+        for _ in 0..BRENT_MAX_ITERATIONS {
+            let midpoint = 0.5 * (lo + hi);
+            let tol1 = BRENT_WEIGHT_TOL + BRENT_ZEPS;
+            let tol2 = 2.0 * tol1;
+            if (hi - lo) <= GOLDEN_SECTION_WEIGHT_TOL
+                || (x - midpoint).abs() <= tol2 - 0.5 * (hi - lo)
+            {
+                break;
+            }
+
+            if e.abs() > tol1 {
+                let r = (x - w) * (fx - fv);
+                let q = (x - v) * (fx - fw);
+                let mut p = (x - v) * q - (x - w) * r;
+                let mut q2 = 2.0 * (q - r);
+                if q2 > 0.0 {
+                    p = -p;
+                } else {
+                    q2 = -q2;
+                }
+
+                let previous_e = e;
+                e = d;
+                if q2 > 0.0
+                    && p.abs() < (0.5 * q2 * previous_e).abs()
+                    && p > q2 * (lo - x)
+                    && p < q2 * (hi - x)
+                {
+                    d = p / q2;
+                    let u = x + d;
+                    if u - lo < tol2 || hi - u < tol2 {
+                        d = if x < midpoint { tol1 } else { -tol1 };
+                    }
+                } else {
+                    e = if x < midpoint { hi - x } else { lo - x };
+                    d = BRENT_CGOLD * e;
+                }
+            } else {
+                e = if x < midpoint { hi - x } else { lo - x };
+                d = BRENT_CGOLD * e;
+            }
+
+            let step = if d.abs() >= tol1 {
+                d
+            } else if d >= 0.0 {
+                tol1
+            } else {
+                -tol1
+            };
+            let mut u = x + step;
+            if u <= lo {
+                u = 0.5 * (lo + x);
+            } else if u >= hi {
+                u = 0.5 * (x + hi);
+            }
+            if (u - x).abs() <= BRENT_ZEPS {
+                break;
+            }
+
+            let fu = self.objective(u);
+            if fu <= fx {
+                if u < x {
+                    hi = x;
+                } else {
+                    lo = x;
+                }
+                v = w;
+                fv = fw;
+                w = x;
+                fw = fx;
+                x = u;
+                fx = fu;
+            } else {
+                if u < x {
+                    lo = u;
+                } else {
+                    hi = u;
+                }
+                if fu.is_finite() && (fu <= fw || w == x) {
+                    v = w;
+                    fv = fw;
+                    w = u;
+                    fw = fu;
+                } else if fu.is_finite() && (fu <= fv || v == x || v == w) {
+                    v = u;
+                    fv = fu;
+                }
+            }
+        }
+
+        fx.is_finite().then_some((fx, x))
     }
 
     fn plane_back_direction(&self, value_idx: f64) -> Option<f64> {
@@ -579,7 +696,12 @@ impl Solver {
         if best_sample > 0 && best_sample < samples {
             let lo = (best_sample - 1) as f64 / samples as f64;
             let hi = (best_sample + 1) as f64 / samples as f64;
-            if let Some((value, weight)) = context.golden_section(lo, hi) {
+            let refined = if context.barrier_bounds_clear {
+                context.brent_minimize(lo, best_weight, hi, best_value)
+            } else {
+                context.golden_section(lo, hi)
+            };
+            if let Some((value, weight)) = refined {
                 if value < best_value {
                     best_value = value;
                     best_weight = weight;
