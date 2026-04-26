@@ -16,6 +16,7 @@ import rasterio as rio
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
 from rasterio.transform import from_origin, rowcol, xy
+from rasterio.windows import from_bounds
 from rasterio.warp import (
     reproject,
     transform as transform_coords,
@@ -31,6 +32,7 @@ from ._distance import (
     distance_accumulation,
     evaluate_path_cost as _evaluate_raster_path_cost,
     optimal_path_trace,
+    route_legs_windowed as _route_legs_windowed,
 )
 
 
@@ -300,6 +302,7 @@ def route_path(
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
     baseline_speed: float = 5.0,
     compute_metrics: bool = True,
+    parallel: bool = False,
 ) -> OptimalPathResult:
     """Compute and stitch optimal route legs through consecutive waypoints."""
 
@@ -320,6 +323,21 @@ def route_path(
         raise ValueError("at least two waypoints are required")
 
     vf = VerticalFactor.from_any(vertical_factor)
+    if parallel:
+        return _route_path_parallel(
+            cost_spec,
+            waypoint_xy,
+            target=target,
+            elevation=elevation,
+            elevation_resampling=elevation_resampling,
+            barriers=barriers,
+            grid_spec=grid_spec,
+            margin=margin,
+            vertical_factor=vf,
+            baseline_speed_value=baseline_speed_value,
+            compute_metrics=compute_metrics,
+        )
+
     legs: list[OptimalPathLeg] = []
     path_parts: list[npt.NDArray[np.float64]] = []
     total_metrics: PathMetrics | None = None
@@ -377,6 +395,100 @@ def route_path(
                 grid=geo.grid,
                 metrics=metrics,
                 trace_metadata=trace.metadata,
+            )
+        )
+        path_parts.append(path_xy if not path_parts else path_xy[1:])
+
+    full_path = np.vstack(path_parts) if path_parts else np.empty((0, 2), dtype=np.float64)
+    return OptimalPathResult(
+        path_xy=full_path,
+        legs=tuple(legs),
+        waypoint_xy=waypoint_xy,
+        crs=target,
+        metrics=total_metrics,
+    )
+
+
+def _route_path_parallel(
+    cost_spec: CostRaster,
+    waypoint_xy: tuple[XY, ...],
+    *,
+    target: Any,
+    elevation: str | Path | None,
+    elevation_resampling: str | Any,
+    barriers: Any | None,
+    grid_spec: GridSpec,
+    margin: float | None,
+    vertical_factor: VerticalFactor,
+    baseline_speed_value: float,
+    compute_metrics: bool,
+) -> OptimalPathResult:
+    route_grid = _route_grid_spec(grid_spec, target, waypoint_xy, margin=margin)
+    geo = load_surface(
+        cost_spec,
+        elevation=elevation,
+        elevation_resampling=elevation_resampling,
+        barriers=barriers,
+        grid=route_grid,
+    )
+
+    leg_windows: list[tuple[int, int, int, int, int, int, int, int]] = []
+    leg_endpoints: list[tuple[Cell, Cell]] = []
+    for start_xy, end_xy in zip(waypoint_xy, waypoint_xy[1:]):
+        source_cell = geo.grid.xy_to_cell(*start_xy)
+        destination_cell = geo.grid.xy_to_cell(*end_xy)
+        _validate_endpoint(geo, source_cell, "source")
+        _validate_endpoint(geo, destination_cell, "destination")
+        leg_windows.append(
+            (
+                *source_cell,
+                *destination_cell,
+                *_leg_window(geo.grid, start_xy, end_xy, margin=margin),
+            )
+        )
+        leg_endpoints.append((source_cell, destination_cell))
+
+    solved_legs = _route_legs_windowed(
+        geo.surface,
+        np.asarray(leg_windows, dtype=np.int64),
+        vertical_factor=vertical_factor,
+    )
+
+    legs: list[OptimalPathLeg] = []
+    path_parts: list[npt.NDArray[np.float64]] = []
+    total_metrics: PathMetrics | None = None
+    for index, (start_xy, end_xy) in enumerate(zip(waypoint_xy, waypoint_xy[1:])):
+        source_cell, destination_cell = leg_endpoints[index]
+        solved = solved_legs[index]
+        path_xy = geo.grid.raster_line_to_xy(solved.line)[::-1].copy()
+        metrics = (
+            _path_metrics(
+                path_xy,
+                cost=solved.cost,
+                geo=geo,
+                vertical_factor=vertical_factor,
+                baseline_speed_kmh=baseline_speed_value,
+            )
+            if compute_metrics
+            else None
+        )
+        if metrics is not None:
+            total_metrics = (
+                metrics if total_metrics is None else _combine_metrics(total_metrics, metrics)
+            )
+
+        legs.append(
+            OptimalPathLeg(
+                index=index,
+                start_xy=start_xy,
+                end_xy=end_xy,
+                source_cell=source_cell,
+                destination_cell=destination_cell,
+                path_xy=path_xy,
+                cost=solved.cost,
+                grid=geo.grid,
+                metrics=metrics,
+                trace_metadata=solved.metadata,
             )
         )
         path_parts.append(path_xy if not path_parts else path_xy[1:])
@@ -449,6 +561,57 @@ def _leg_grid_spec(
             max(start_xy[1], end_xy[1]) + margin,
         )
     return replace(grid, crs=target_crs, bounds=bounds)
+
+
+def _route_grid_spec(
+    grid: GridSpec,
+    target_crs: Any,
+    waypoint_xy: Sequence[XY],
+    *,
+    margin: float | None,
+) -> GridSpec:
+    margin = _normalize_optional_radius(margin, "margin")
+    bounds = grid.bounds
+    if margin is not None:
+        xs = [point[0] for point in waypoint_xy]
+        ys = [point[1] for point in waypoint_xy]
+        bounds = (
+            min(xs) - margin,
+            min(ys) - margin,
+            max(xs) + margin,
+            max(ys) + margin,
+        )
+    return replace(grid, crs=target_crs, bounds=bounds)
+
+
+def _leg_window(
+    grid: GeoGrid,
+    start_xy: XY,
+    end_xy: XY,
+    *,
+    margin: float | None,
+) -> tuple[int, int, int, int]:
+    if margin is None:
+        height, width = grid.shape
+        return 0, height, 0, width
+
+    margin = _normalize_optional_radius(margin, "margin")
+    assert margin is not None
+    bounds = (
+        min(start_xy[0], end_xy[0]) - margin,
+        min(start_xy[1], end_xy[1]) - margin,
+        max(start_xy[0], end_xy[0]) + margin,
+        max(start_xy[1], end_xy[1]) + margin,
+    )
+    window = from_bounds(*bounds, transform=grid.transform)
+    height, width = grid.shape
+    row_min = max(0, math.floor(window.row_off))
+    col_min = max(0, math.floor(window.col_off))
+    row_max = min(height, math.ceil(window.row_off + window.height))
+    col_max = min(width, math.ceil(window.col_off + window.width))
+    if row_min >= row_max or col_min >= col_max:
+        raise ValueError("route leg crop does not overlap the loaded raster")
+    return row_min, row_max, col_min, col_max
 
 
 def _validate_endpoint(geo: GeoSurface, cell: Cell, name: str) -> None:

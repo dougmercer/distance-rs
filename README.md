@@ -218,6 +218,19 @@ wrapped in `GeoPoints(..., crs=...)` or `GeoBarriers(..., crs=...)`. When
 box plus that many map units, snapped to the cost raster grid. The native solver
 uses a local 3-by-3 Eikonal stencil for ArcGIS-style behavior.
 
+For multi-waypoint routes where reading the raster is the expensive step, pass
+`parallel=True` to load one shared route surface and solve each leg concurrently
+with Rayon-backed native workers:
+
+```python
+route = route_path(
+    CostRaster("cost.tif", values={1: 1.0, 2: 1.8}),
+    GeoPoints([(76.612, 39.291), (76.601, 39.303), (76.589, 39.317)], crs="EPSG:4326"),
+    margin=250.0,
+    parallel=True,
+)
+```
+
 To exercise the cropped GeoTIFF path on large local files, generate synthetic
 8000 x 8000 rasters at 1.5 meter resolution, route across a small corridor, and
 compare ordered upwind against the simpler 8-neighbor raster Dijkstra baseline:

@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -226,8 +227,8 @@ impl<'py, 'a> ProgressReporter<'py, 'a> {
 
 pub(crate) struct Solver {
     pub(crate) grid: Grid,
-    pub(crate) cost: Vec<f64>,
-    pub(crate) elevation: Vec<f64>,
+    pub(crate) cost: Arc<[f64]>,
+    pub(crate) elevation: Arc<[f64]>,
     pub(crate) barriers: BarrierMask,
     pub(crate) has_elevation: bool,
     pub(crate) flat_cost_mode: bool,
@@ -253,25 +254,61 @@ pub(crate) struct SolverInput {
     pub(crate) cell_size_y: f64,
 }
 
+#[derive(Clone)]
+pub(crate) struct SharedSolverInput {
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) cost: Arc<[f64]>,
+    pub(crate) elevation: Arc<[f64]>,
+    pub(crate) barriers: BarrierMask,
+    pub(crate) has_elevation: bool,
+    pub(crate) flat_cost_mode: bool,
+    pub(crate) vf: VerticalFactor,
+    pub(crate) cell_size_x: f64,
+    pub(crate) cell_size_y: f64,
+}
+
 pub(crate) struct SolveOutput {
     pub(crate) distance: Vec<f64>,
     pub(crate) parent: Vec<Parent>,
     pub(crate) back_direction: Vec<f64>,
 }
 
-impl Solver {
+impl SharedSolverInput {
     pub(crate) fn new(input: SolverInput) -> Self {
-        let grid = Grid::new(input.rows, input.cols, input.cell_size_x, input.cell_size_y);
-        let n = input.rows * input.cols;
         let barriers =
             BarrierMask::new(input.rows, input.cols, input.valid, input.has_blocked_cells);
+        Self {
+            rows: input.rows,
+            cols: input.cols,
+            cost: input.cost.into(),
+            elevation: input.elevation.into(),
+            barriers,
+            has_elevation: input.has_elevation,
+            flat_cost_mode: !input.has_elevation && input.vf.kind == VerticalFactorKind::None,
+            vf: input.vf,
+            cell_size_x: input.cell_size_x,
+            cell_size_y: input.cell_size_y,
+        }
+    }
+}
+
+impl Solver {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new(input: SolverInput) -> Self {
+        Self::from_shared(SharedSolverInput::new(input))
+    }
+
+    pub(crate) fn from_shared(input: SharedSolverInput) -> Self {
+        let grid = Grid::new(input.rows, input.cols, input.cell_size_x, input.cell_size_y);
+        let n = input.rows * input.cols;
         Self {
             grid,
             cost: input.cost,
             elevation: input.elevation,
-            barriers,
+            barriers: input.barriers,
             has_elevation: input.has_elevation,
-            flat_cost_mode: !input.has_elevation && input.vf.kind == VerticalFactorKind::None,
+            flat_cost_mode: input.flat_cost_mode,
             vf: input.vf,
             distance: vec![f64::INFINITY; n],
             parent: vec![Parent::none(); n],

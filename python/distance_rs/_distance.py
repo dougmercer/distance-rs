@@ -20,10 +20,13 @@ __all__ = [
     "RasterGrid",
     "RasterSurface",
     "PathTraceResult",
+    "RouteLegResult",
     "VerticalFactor",
     "distance_accumulation",
     "optimal_path_as_line",
     "optimal_path_trace",
+    "route_legs",
+    "route_legs_windowed",
 ]
 
 
@@ -321,6 +324,15 @@ class PathTraceResult:
 
 
 @dataclass
+class RouteLegResult:
+    """Native route leg trace returned by a parallel batched solve."""
+
+    line: npt.NDArray[np.float64]
+    cost: float
+    metadata: dict[str, int]
+
+
+@dataclass
 class DistanceAccumulationResult:
     distance: npt.NDArray[np.float64]
     _valid: npt.NDArray[np.bool_] = field(repr=False)
@@ -355,7 +367,7 @@ def distance_accumulation(
     *,
     target: Cell | Sequence[Cell] | npt.ArrayLike | None = None,
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
-    progress: ProgressOption = True,
+    progress: ProgressOption = False,
     progress_interval: int | None = None,
 ) -> DistanceAccumulationResult:
     """Compute accumulated cost distance from one or more source cells.
@@ -426,6 +438,111 @@ def distance_accumulation(
         origin=(origin_x, origin_y),
         vertical_factor=vf,
     )
+
+
+def route_legs(
+    surface: RasterSurface | npt.ArrayLike,
+    legs: npt.ArrayLike,
+    *,
+    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
+) -> list[RouteLegResult]:
+    """Solve independent source/destination legs on one shared raster surface.
+
+    `legs` must have shape `(n, 4)` with columns
+    `(source_row, source_col, target_row, target_col)`. The native
+    implementation shares immutable raster layers across worker threads and
+    uses Rayon to solve each leg in parallel.
+    """
+
+    if not isinstance(surface, RasterSurface):
+        surface = RasterSurface(surface)
+
+    cost_arr = np.ascontiguousarray(np.asarray(surface.cost, dtype=np.float64))
+    if cost_arr.ndim != 2:
+        raise ValueError("surface cost must be a 2D array")
+
+    elevation_arr = _optional_surface_array(surface.elevation, cost_arr.shape, "elevation")
+    barrier_arr = _optional_barrier_array(surface.barriers, cost_arr.shape)
+    leg_arr = _normalize_leg_cells(legs, cost_arr.shape)
+    cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
+    origin_x, origin_y = _normalize_origin(surface.grid.origin)
+    vf = VerticalFactor.from_any(vertical_factor)
+
+    raw_legs = _native.route_legs(
+        leg_arr,
+        cost_arr,
+        elevation_arr,
+        barrier_arr,
+        vf.as_native(),
+        cell_size_x,
+        cell_size_y,
+    )
+    legs_out = []
+    for raw in raw_legs:
+        line = np.asarray(raw["line"], dtype=np.float64).copy()
+        line[:, 0] += origin_x
+        line[:, 1] += origin_y
+        legs_out.append(
+            RouteLegResult(
+                line=line,
+                cost=float(raw["cost"]),
+                metadata={key: int(value) for key, value in raw["metadata"].items()},
+            )
+        )
+    return legs_out
+
+
+def route_legs_windowed(
+    surface: RasterSurface | npt.ArrayLike,
+    leg_windows: npt.ArrayLike,
+    *,
+    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
+) -> list[RouteLegResult]:
+    """Solve independent route legs using copied per-leg windows.
+
+    `leg_windows` must have shape `(n, 8)` with columns
+    `(source_row, source_col, target_row, target_col, row_min, row_max,
+    col_min, col_max)`, where bounds are exclusive. The native implementation
+    shares the full input raster, copies each window inside a Rayon worker, and
+    solves only that local crop.
+    """
+
+    if not isinstance(surface, RasterSurface):
+        surface = RasterSurface(surface)
+
+    cost_arr = np.ascontiguousarray(np.asarray(surface.cost, dtype=np.float64))
+    if cost_arr.ndim != 2:
+        raise ValueError("surface cost must be a 2D array")
+
+    elevation_arr = _optional_surface_array(surface.elevation, cost_arr.shape, "elevation")
+    barrier_arr = _optional_barrier_array(surface.barriers, cost_arr.shape)
+    window_arr = _normalize_leg_windows(leg_windows, cost_arr.shape)
+    cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
+    origin_x, origin_y = _normalize_origin(surface.grid.origin)
+    vf = VerticalFactor.from_any(vertical_factor)
+
+    raw_legs = _native.route_legs_windowed(
+        window_arr,
+        cost_arr,
+        elevation_arr,
+        barrier_arr,
+        vf.as_native(),
+        cell_size_x,
+        cell_size_y,
+    )
+    legs_out = []
+    for raw in raw_legs:
+        line = np.asarray(raw["line"], dtype=np.float64).copy()
+        line[:, 0] += origin_x
+        line[:, 1] += origin_y
+        legs_out.append(
+            RouteLegResult(
+                line=line,
+                cost=float(raw["cost"]),
+                metadata={key: int(value) for key, value in raw["metadata"].items()},
+            )
+        )
+    return legs_out
 
 
 def evaluate_path_cost(
@@ -556,6 +673,84 @@ def _normalize_target_cells(
     shape: tuple[int, int],
 ) -> npt.NDArray[np.int64]:
     return _normalize_cells(target, shape, name="target")
+
+
+def _normalize_leg_cells(
+    value: npt.ArrayLike,
+    shape: tuple[int, int],
+) -> npt.NDArray[np.int64]:
+    cells_float = np.asarray(value, dtype=np.float64)
+    if cells_float.ndim != 2 or cells_float.shape[1] != 4:
+        raise ValueError(
+            "legs must have shape (n, 4): source_row, source_col, target_row, target_col"
+        )
+    if cells_float.shape[0] == 0:
+        raise ValueError("at least one route leg is required")
+    if not np.all(np.isfinite(cells_float)):
+        raise ValueError("route leg cells must be finite")
+
+    rounded = np.rint(cells_float)
+    if not np.array_equal(cells_float, rounded):
+        raise ValueError("route leg cells must be integer row/col coordinates")
+    cells = np.ascontiguousarray(rounded.astype(np.int64))
+
+    rows, cols = shape
+    row_cols = cells.reshape(-1, 2)
+    if (
+        np.any(row_cols[:, 0] < 0)
+        or np.any(row_cols[:, 1] < 0)
+        or np.any(row_cols[:, 0] >= rows)
+        or np.any(row_cols[:, 1] >= cols)
+    ):
+        raise ValueError("route leg cell is outside the raster")
+    return cells
+
+
+def _normalize_leg_windows(
+    value: npt.ArrayLike,
+    shape: tuple[int, int],
+) -> npt.NDArray[np.int64]:
+    windows_float = np.asarray(value, dtype=np.float64)
+    if windows_float.ndim != 2 or windows_float.shape[1] != 8:
+        raise ValueError(
+            "leg_windows must have shape (n, 8): source_row, source_col, target_row, "
+            "target_col, row_min, row_max, col_min, col_max"
+        )
+    if windows_float.shape[0] == 0:
+        raise ValueError("at least one route leg window is required")
+    if not np.all(np.isfinite(windows_float)):
+        raise ValueError("route leg windows must be finite")
+
+    rounded = np.rint(windows_float)
+    if not np.array_equal(windows_float, rounded):
+        raise ValueError("route leg windows must use integer row/col coordinates")
+    windows = np.ascontiguousarray(rounded.astype(np.int64))
+
+    rows, cols = shape
+    row_min = windows[:, 4]
+    row_max = windows[:, 5]
+    col_min = windows[:, 6]
+    col_max = windows[:, 7]
+    if (
+        np.any(row_min < 0)
+        or np.any(col_min < 0)
+        or np.any(row_max <= row_min)
+        or np.any(col_max <= col_min)
+        or np.any(row_max > rows)
+        or np.any(col_max > cols)
+    ):
+        raise ValueError("route leg window is outside the raster")
+    for row_index, col_index in ((0, 1), (2, 3)):
+        row = windows[:, row_index]
+        col = windows[:, col_index]
+        if (
+            np.any(row < row_min)
+            or np.any(row >= row_max)
+            or np.any(col < col_min)
+            or np.any(col >= col_max)
+        ):
+            raise ValueError("route leg endpoint is outside its window")
+    return windows
 
 
 def _normalize_cells(

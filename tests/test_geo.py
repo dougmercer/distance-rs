@@ -250,3 +250,29 @@ def test_route_path_stitches_waypoint_legs_and_metrics(tmp_path: Path) -> None:
     assert route.metrics.average_speed_kmh == pytest.approx(
         route.metrics.surface_distance_m / 1000.0 / route.metrics.time_hours
     )
+
+
+def test_route_path_can_solve_legs_in_parallel_from_one_surface(tmp_path: Path) -> None:
+    cost_path = tmp_path / "cost.tif"
+    _write_geotiff(
+        cost_path,
+        np.ones((30, 30), dtype=np.float32),
+        transform=from_origin(0.0, 300.0, 10.0, 10.0),
+        crs="EPSG:3857",
+    )
+    waypoints = GeoPoints(
+        [(5.0, 295.0), (145.0, 155.0), (245.0, 55.0)],
+        crs="EPSG:3857",
+    )
+
+    sequential = route_path(cost_path, waypoints, margin=40.0)
+    parallel = route_path(cost_path, waypoints, margin=40.0, parallel=True)
+
+    assert len(parallel.legs) == 2
+    assert np.allclose(parallel.path_xy[0], [5.0, 295.0])
+    assert np.allclose(parallel.path_xy[-1], [245.0, 55.0])
+    assert parallel.metrics is not None
+    assert sequential.metrics is not None
+    assert parallel.metrics.cost == pytest.approx(sequential.metrics.cost)
+    assert [leg.index for leg in parallel.legs] == [0, 1]
+    assert all(leg.trace_metadata["direction_steps"] > 0 for leg in parallel.legs)
