@@ -19,7 +19,6 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-
 from distance_rs import (
     RasterGrid,
     RasterSurface,

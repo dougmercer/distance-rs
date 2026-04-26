@@ -10,7 +10,6 @@ from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
-
 from distance_rs import RasterSurface, distance_accumulation, optimal_path_as_line
 from distance_rs.baselines import (
     path_cost_metrics,

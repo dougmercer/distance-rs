@@ -10,14 +10,13 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-
 from distance_rs import RasterSurface, distance_accumulation, optimal_path_as_line
 from distance_rs.baselines import (
     compare_distances,
     path_cost_metrics,
     raster_dijkstra,
-    trace_raster_path,
     trace_path_mask,
+    trace_raster_path,
     whitebox_cost_distance,
 )
 

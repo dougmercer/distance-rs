@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence, TypeGuard, cast, overload
 
 import numpy as np
 import numpy.typing as npt
 
 from . import _native
-
 
 Cell = tuple[int, int]
 ProgressCallback = Callable[[int, int], None]

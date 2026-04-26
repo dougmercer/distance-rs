@@ -16,11 +16,6 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import rasterio
-from rasterio.enums import Resampling
-from rasterio.transform import from_origin, rowcol
-from rasterio.windows import Window, bounds as window_bounds, from_bounds
-from shapely.geometry import Polygon
-
 from distance_rs import (
     CostRaster,
     GeoBarriers,
@@ -39,7 +34,11 @@ from distance_rs.baselines import (
     trace_raster_path,
     whitebox_cost_distance,
 )
-
+from rasterio.enums import Resampling
+from rasterio.transform import from_origin, rowcol
+from rasterio.windows import Window, from_bounds
+from rasterio.windows import bounds as window_bounds
+from shapely.geometry import Polygon
 
 CRS = "EPSG:32618"
 WEST = 500_000.0

@@ -17,13 +17,15 @@ from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
 from rasterio.transform import from_origin, rowcol, xy
-from rasterio.windows import from_bounds
 from rasterio.warp import (
     reproject,
-    transform as transform_coords,
     transform_bounds,
     transform_geom,
 )
+from rasterio.warp import (
+    transform as transform_coords,
+)
+from rasterio.windows import from_bounds
 from shapely.geometry.base import BaseGeometry
 
 from ._distance import (
@@ -31,11 +33,14 @@ from ._distance import (
     RasterSurface,
     VerticalFactor,
     distance_accumulation,
-    evaluate_path_cost as _evaluate_raster_path_cost,
     optimal_path_trace,
+)
+from ._distance import (
+    evaluate_path_cost as _evaluate_raster_path_cost,
+)
+from ._distance import (
     route_legs_windowed as _route_legs_windowed,
 )
-
 
 Bounds = tuple[float, float, float, float]
 Cell = tuple[int, int]

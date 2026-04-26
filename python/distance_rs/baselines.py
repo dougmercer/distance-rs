@@ -16,11 +16,10 @@ from ._distance import (
     ProgressOption,
     RasterSurface,
     VerticalFactor,
-    evaluate_path_cost,
     _normalize_progress_callback,
     _normalize_progress_interval,
+    evaluate_path_cost,
 )
-
 
 MIN_COST = 1.0e-12
 WHITEBOX_NODATA = -32768.0

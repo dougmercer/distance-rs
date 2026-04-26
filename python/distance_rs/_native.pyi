@@ -6,7 +6,6 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-
 def distance_accumulation(
     source_cells: npt.NDArray[np.int64],
     cost: npt.NDArray[np.float64],
@@ -19,8 +18,6 @@ def distance_accumulation(
     progress: Callable[[int, int], None] | None,
     progress_interval: int,
 ) -> dict[str, Any]: ...
-
-
 def route_legs(
     legs: npt.NDArray[np.int64],
     cost: npt.NDArray[np.float64],
@@ -30,8 +27,6 @@ def route_legs(
     cell_size_x: float,
     cell_size_y: float,
 ) -> list[dict[str, Any]]: ...
-
-
 def route_legs_windowed(
     leg_windows: npt.NDArray[np.int64],
     cost: npt.NDArray[np.float64],
@@ -41,8 +36,6 @@ def route_legs_windowed(
     cell_size_x: float,
     cell_size_y: float,
 ) -> list[dict[str, Any]]: ...
-
-
 def optimal_path_as_line(
     distance: npt.NDArray[np.float64],
     valid: npt.NDArray[np.bool_],
@@ -58,8 +51,6 @@ def optimal_path_as_line(
     origin_y: float,
     max_steps: int,
 ) -> npt.NDArray[np.float64]: ...
-
-
 def optimal_path_trace(
     distance: npt.NDArray[np.float64],
     valid: npt.NDArray[np.bool_],

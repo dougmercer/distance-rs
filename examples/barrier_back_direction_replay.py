@@ -4,16 +4,14 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
 import math
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-
-from distance_rs import DistanceAccumulationResult, RasterSurface, distance_accumulation
-from distance_rs import optimal_path_as_line
+from distance_rs import DistanceAccumulationResult, RasterSurface, distance_accumulation, optimal_path_as_line
 from distance_rs.baselines import (
     path_cost_metrics,
     raster_dijkstra,
@@ -21,7 +19,6 @@ from distance_rs.baselines import (
     trace_raster_path,
     whitebox_cost_distance,
 )
-
 
 Point = tuple[float, float]
 
