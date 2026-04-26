@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -15,6 +14,7 @@ pub(crate) const TRIAL: u8 = 1;
 pub(crate) const ACCEPTED: u8 = 2;
 const DISTANCE_EPS_ABS: f64 = 1.0e-12;
 const DISTANCE_EPS_REL: f64 = 1.0e-12;
+const HEAP_NO_POS: usize = usize::MAX;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HeapEntry {
@@ -42,6 +42,105 @@ impl Ord for HeapEntry {
             .value
             .total_cmp(&self.value)
             .then_with(|| other.idx.cmp(&self.idx))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct IndexedMinHeap {
+    heap: Vec<usize>,
+    positions: Vec<usize>,
+    values: Vec<f64>,
+}
+
+impl IndexedMinHeap {
+    pub(crate) fn new(len: usize) -> Self {
+        Self {
+            heap: Vec::new(),
+            positions: vec![HEAP_NO_POS; len],
+            values: vec![f64::INFINITY; len],
+        }
+    }
+
+    pub(crate) fn push_or_decrease(&mut self, idx: usize, value: f64) {
+        debug_assert!(value.is_finite());
+        let position = self.positions[idx];
+        if position == HEAP_NO_POS {
+            self.values[idx] = value;
+            self.positions[idx] = self.heap.len();
+            self.heap.push(idx);
+            self.sift_up(self.heap.len() - 1);
+        } else if value < self.values[idx] {
+            self.values[idx] = value;
+            self.sift_up(position);
+        }
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<HeapEntry> {
+        if self.heap.is_empty() {
+            return None;
+        }
+
+        let min_idx = self.heap[0];
+        let min_value = self.values[min_idx];
+        let last = self.heap.pop().expect("heap is not empty");
+        self.positions[min_idx] = HEAP_NO_POS;
+        self.values[min_idx] = f64::INFINITY;
+
+        if !self.heap.is_empty() {
+            self.heap[0] = last;
+            self.positions[last] = 0;
+            self.sift_down(0);
+        }
+
+        Some(HeapEntry {
+            value: min_value,
+            idx: min_idx,
+        })
+    }
+
+    fn sift_up(&mut self, mut position: usize) {
+        while position > 0 {
+            let parent = (position - 1) / 2;
+            if !self.less(position, parent) {
+                break;
+            }
+            self.swap(position, parent);
+            position = parent;
+        }
+    }
+
+    fn sift_down(&mut self, mut position: usize) {
+        loop {
+            let left = 2 * position + 1;
+            let right = left + 1;
+            let mut smallest = position;
+
+            if left < self.heap.len() && self.less(left, smallest) {
+                smallest = left;
+            }
+            if right < self.heap.len() && self.less(right, smallest) {
+                smallest = right;
+            }
+            if smallest == position {
+                break;
+            }
+            self.swap(position, smallest);
+            position = smallest;
+        }
+    }
+
+    fn less(&self, a_position: usize, b_position: usize) -> bool {
+        let a = self.heap[a_position];
+        let b = self.heap[b_position];
+        let a_value = self.values[a];
+        let b_value = self.values[b];
+        a_value < b_value || (a_value == b_value && a < b)
+    }
+
+    fn swap(&mut self, a: usize, b: usize) {
+        self.heap.swap(a, b);
+        self.positions[self.heap[a]] = a;
+        self.positions[self.heap[b]] = b;
     }
 }
 
@@ -137,7 +236,7 @@ pub(crate) struct Solver {
     pub(crate) parent: Vec<Parent>,
     pub(crate) back_direction: Vec<f64>,
     pub(crate) state: Vec<u8>,
-    pub(crate) heap: BinaryHeap<HeapEntry>,
+    pub(crate) heap: IndexedMinHeap,
     segment_clear_crossings: RefCell<Vec<f64>>,
 }
 
@@ -178,7 +277,7 @@ impl Solver {
             parent: vec![Parent::none(); n],
             back_direction: vec![f64::NAN; n],
             state: vec![FAR; n],
-            heap: BinaryHeap::new(),
+            heap: IndexedMinHeap::new(n),
             segment_clear_crossings: RefCell::new(Vec::new()),
         }
     }
@@ -241,9 +340,6 @@ impl Solver {
 
         while let Some(entry) = self.heap.pop() {
             if self.state[entry.idx] == ACCEPTED {
-                continue;
-            }
-            if value_is_stale(entry.value, self.distance[entry.idx]) {
                 continue;
             }
 
@@ -375,6 +471,7 @@ pub(crate) fn distance_tolerance(a: f64, b: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn value_is_stale(value: f64, best: f64) -> bool {
     value > best + distance_tolerance(value, best)
 }
@@ -385,24 +482,32 @@ pub(crate) fn value_improves(value: f64, best: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BinaryHeap;
-
-    use super::{distance_tolerance, value_improves, value_is_stale, HeapEntry};
+    use super::{distance_tolerance, value_improves, value_is_stale, IndexedMinHeap};
 
     #[test]
-    fn heap_entry_ordering_is_total_for_nan_values() {
-        let mut heap = BinaryHeap::from([
-            HeapEntry {
-                value: f64::NAN,
-                idx: 0,
-            },
-            HeapEntry { value: 2.0, idx: 1 },
-            HeapEntry { value: 1.0, idx: 2 },
-        ]);
+    fn indexed_heap_orders_by_value_then_index() {
+        let mut heap = IndexedMinHeap::new(3);
+        heap.push_or_decrease(0, 2.0);
+        heap.push_or_decrease(1, 1.0);
+        heap.push_or_decrease(2, 1.0);
 
-        assert_eq!(heap.pop().unwrap().idx, 2);
         assert_eq!(heap.pop().unwrap().idx, 1);
+        assert_eq!(heap.pop().unwrap().idx, 2);
         assert_eq!(heap.pop().unwrap().idx, 0);
+    }
+
+    #[test]
+    fn indexed_heap_decreases_existing_entry() {
+        let mut heap = IndexedMinHeap::new(3);
+        heap.push_or_decrease(0, 5.0);
+        heap.push_or_decrease(1, 4.0);
+        heap.push_or_decrease(0, 3.0);
+
+        let first = heap.pop().unwrap();
+        assert_eq!(first.idx, 0);
+        assert_eq!(first.value, 3.0);
+        assert_eq!(heap.pop().unwrap().idx, 1);
+        assert!(heap.pop().is_none());
     }
 
     #[test]

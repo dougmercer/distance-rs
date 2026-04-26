@@ -1,5 +1,5 @@
 use crate::grid::{direction_from_delta, EPS, NEIGHBORS_8};
-use crate::solver::{value_improves, HeapEntry, Parent, Solver, TRIAL};
+use crate::solver::{value_improves, Parent, Solver, TRIAL};
 use crate::vertical::VerticalFactorKind;
 
 const GOLDEN_SECTION_MAX_ITERATIONS: usize = 14;
@@ -687,10 +687,7 @@ impl Solver {
             self.parent[update.idx] = update.parent;
             self.back_direction[update.idx] = update.back_direction;
             self.state[update.idx] = TRIAL;
-            self.heap.push(HeapEntry {
-                value: update.value,
-                idx: update.idx,
-            });
+            self.heap.push_or_decrease(update.idx, update.value);
         }
     }
 
