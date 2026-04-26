@@ -1,4 +1,4 @@
-use crate::grid::{EPS, NEIGHBORS_8};
+use crate::grid::{direction_from_delta, EPS, NEIGHBORS_8};
 use crate::solver::{value_improves, HeapEntry, Parent, Solver, TRIAL};
 use crate::vertical::VerticalFactorKind;
 
@@ -604,12 +604,23 @@ impl Solver {
         }
         let a = parent.a as usize;
         if parent.b < 0 {
+            if let Some(back_direction) = self.cached_point_back_direction(idx, a) {
+                return Some(back_direction);
+            }
             return self.back_direction_to_index(idx, a);
         }
 
         let b = parent.b as usize;
         let context = SegmentContext::new(self, idx, a, b);
         self.segment_back_direction(&context, value, parent.weight)
+    }
+
+    fn cached_point_back_direction(&self, idx: usize, target: usize) -> Option<f64> {
+        let (row, col) = self.row_col(idx);
+        let (target_row, target_col) = self.row_col(target);
+        let dr = target_row as isize - row as isize;
+        let dc = target_col as isize - col as isize;
+        self.grid.back_direction_for_offset(dr, dc)
     }
 
     fn surface_distance(&self, plan_distance: f64, dz: f64) -> f64 {
@@ -646,13 +657,6 @@ impl Solver {
     }
 
     fn direction_from_delta(dx: f64, dy: f64) -> Option<f64> {
-        if !dx.is_finite() || !dy.is_finite() || dx.hypot(dy) <= EPS {
-            return None;
-        }
-        let mut degrees = dx.atan2(-dy).to_degrees();
-        if degrees < 0.0 {
-            degrees += 360.0;
-        }
-        Some(degrees)
+        direction_from_delta(dx, dy)
     }
 }
