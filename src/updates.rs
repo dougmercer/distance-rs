@@ -2,7 +2,11 @@ use crate::grid::{direction_from_delta, EPS, NEIGHBORS_8};
 use crate::solver::{value_improves, HeapEntry, Parent, Solver, TRIAL};
 use crate::vertical::VerticalFactorKind;
 
-const GOLDEN_SECTION_ITERATIONS: usize = 14;
+const GOLDEN_SECTION_MAX_ITERATIONS: usize = 14;
+const GOLDEN_SECTION_MIN_ITERATIONS: usize = 6;
+const GOLDEN_SECTION_WEIGHT_TOL: f64 = 1.0e-3;
+const GOLDEN_SECTION_VALUE_TOL_ABS: f64 = 1.0e-12;
+const GOLDEN_SECTION_VALUE_TOL_REL: f64 = 1.0e-10;
 
 #[derive(Clone, Copy, Debug)]
 struct CandidateUpdate {
@@ -161,7 +165,7 @@ impl<'a> SegmentContext<'a> {
         let mut fc = self.objective(c);
         let mut fd = self.objective(d);
 
-        for _ in 0..GOLDEN_SECTION_ITERATIONS {
+        for iteration in 0..GOLDEN_SECTION_MAX_ITERATIONS {
             if fc < fd {
                 hi = d;
                 d = c;
@@ -174,6 +178,12 @@ impl<'a> SegmentContext<'a> {
                 fc = fd;
                 d = lo + gr * (hi - lo);
                 fd = self.objective(d);
+            }
+
+            if iteration + 1 >= GOLDEN_SECTION_MIN_ITERATIONS
+                && golden_section_converged(lo, hi, fc, fd)
+            {
+                break;
             }
         }
 
@@ -282,6 +292,18 @@ impl<'a> SegmentContext<'a> {
             * (scaled_slope * scaled_slope * perpendicular_sq / denominator).sqrt();
         Some((stationary_projection - uv) / u_sq)
     }
+}
+
+fn golden_section_converged(lo: f64, hi: f64, fc: f64, fd: f64) -> bool {
+    if hi - lo <= GOLDEN_SECTION_WEIGHT_TOL {
+        return true;
+    }
+    if !fc.is_finite() || !fd.is_finite() {
+        return false;
+    }
+
+    let scale = fc.abs().max(fd.abs()).max(1.0);
+    (fc - fd).abs() <= GOLDEN_SECTION_VALUE_TOL_ABS.max(scale * GOLDEN_SECTION_VALUE_TOL_REL)
 }
 
 impl Solver {
