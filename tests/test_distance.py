@@ -33,15 +33,15 @@ def test_flat_accumulation_matches_euclidean_distance_near_source() -> None:
 
 def test_route_legs_solves_multiple_legs_on_one_surface() -> None:
     cost = np.ones((21, 21), dtype=float)
-    legs = np.array(
+    leg_windows = np.array(
         [
-            [10, 10, 10, 15],
-            [10, 10, 13, 14],
+            [10, 10, 10, 15, 0, 21, 0, 21],
+            [10, 10, 13, 14, 0, 21, 0, 21],
         ],
         dtype=np.int64,
     )
 
-    solved = route_legs(cost, legs)
+    solved = route_legs(cost, leg_windows)
 
     assert len(solved) == 2
     assert solved[0].cost == pytest.approx(5.0)
@@ -51,7 +51,7 @@ def test_route_legs_solves_multiple_legs_on_one_surface() -> None:
 
     shifted = route_legs(
         RasterSurface(cost, grid=RasterGrid(origin=(100.0, 200.0))),
-        legs[:1],
+        leg_windows[:1],
     )
     assert np.allclose(shifted[0].line[0], [115.0, 210.0])
     assert np.allclose(shifted[0].line[-1], [110.0, 210.0])

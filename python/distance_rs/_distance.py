@@ -25,7 +25,6 @@ __all__ = [
     "optimal_path_as_line",
     "optimal_path_trace",
     "route_legs",
-    "route_legs_windowed",
 ]
 
 
@@ -484,58 +483,6 @@ def distance_accumulation(
 
 def route_legs(
     surface: RasterSurface | npt.ArrayLike,
-    legs: npt.ArrayLike,
-    *,
-    vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
-) -> list[RouteLegResult]:
-    """Solve independent source/destination legs on one shared raster surface.
-
-    `legs` must have shape `(n, 4)` with columns
-    `(source_row, source_col, destination_row, destination_col)`. The native
-    implementation shares immutable raster layers across worker threads and
-    uses Rayon to solve each leg in parallel.
-    """
-
-    if not isinstance(surface, RasterSurface):
-        surface = RasterSurface(surface)
-
-    cost_arr = np.ascontiguousarray(np.asarray(surface.cost, dtype=np.float64))
-    if cost_arr.ndim != 2:
-        raise ValueError("surface cost must be a 2D array")
-
-    elevation_arr = _optional_surface_array(surface.elevation, cost_arr.shape, "elevation")
-    barrier_arr = _optional_barrier_array(surface.barriers, cost_arr.shape)
-    leg_arr = _normalize_leg_cells(legs, cost_arr.shape)
-    cell_size_x, cell_size_y = _normalize_cell_size(surface.grid.cell_size)
-    origin_x, origin_y = _normalize_origin(surface.grid.origin)
-    vf = VerticalFactor.from_any(vertical_factor)
-
-    raw_legs = _native.route_legs(
-        leg_arr,
-        cost_arr,
-        elevation_arr,
-        barrier_arr,
-        vf.as_native(),
-        cell_size_x,
-        cell_size_y,
-    )
-    legs_out = []
-    for raw in raw_legs:
-        line = np.asarray(raw["line"], dtype=np.float64).copy()
-        line[:, 0] += origin_x
-        line[:, 1] += origin_y
-        legs_out.append(
-            RouteLegResult(
-                line=line,
-                cost=float(raw["cost"]),
-                metadata={key: int(value) for key, value in raw["metadata"].items()},
-            )
-        )
-    return legs_out
-
-
-def route_legs_windowed(
-    surface: RasterSurface | npt.ArrayLike,
     leg_windows: npt.ArrayLike,
     *,
     vertical_factor: str | Mapping[str, Any] | VerticalFactor | None = None,
@@ -563,7 +510,7 @@ def route_legs_windowed(
     origin_x, origin_y = _normalize_origin(surface.grid.origin)
     vf = VerticalFactor.from_any(vertical_factor)
 
-    raw_legs = _native.route_legs_windowed(
+    raw_legs = _native.route_legs(
         window_arr,
         cost_arr,
         elevation_arr,
@@ -715,37 +662,6 @@ def _normalize_target_cells(
     shape: tuple[int, int],
 ) -> npt.NDArray[np.int64]:
     return _normalize_cells(target, shape, name="target")
-
-
-def _normalize_leg_cells(
-    value: npt.ArrayLike,
-    shape: tuple[int, int],
-) -> npt.NDArray[np.int64]:
-    cells_float = np.asarray(value, dtype=np.float64)
-    if cells_float.ndim != 2 or cells_float.shape[1] != 4:
-        raise ValueError(
-            "legs must have shape (n, 4): source_row, source_col, destination_row, destination_col"
-        )
-    if cells_float.shape[0] == 0:
-        raise ValueError("at least one route leg is required")
-    if not np.all(np.isfinite(cells_float)):
-        raise ValueError("route leg cells must be finite")
-
-    rounded = np.rint(cells_float)
-    if not np.array_equal(cells_float, rounded):
-        raise ValueError("route leg cells must be integer row/col coordinates")
-    cells = np.ascontiguousarray(rounded.astype(np.int64))
-
-    rows, cols = shape
-    row_cols = cells.reshape(-1, 2)
-    if (
-        np.any(row_cols[:, 0] < 0)
-        or np.any(row_cols[:, 1] < 0)
-        or np.any(row_cols[:, 0] >= rows)
-        or np.any(row_cols[:, 1] >= cols)
-    ):
-        raise ValueError("route leg cell is outside the raster")
-    return cells
 
 
 def _normalize_leg_windows(

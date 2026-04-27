@@ -180,114 +180,6 @@ fn distance_accumulation<'py>(
 #[allow(clippy::too_many_arguments)]
 fn route_legs<'py>(
     py: Python<'py>,
-    leg_cells: PyReadonlyArray2<'py, i64>,
-    cost_surface: PyReadonlyArray2<'py, f64>,
-    elevation: Option<PyReadonlyArray2<'py, f64>>,
-    barriers: Option<PyReadonlyArray2<'py, bool>>,
-    vertical_factor: &Bound<'py, PyDict>,
-    cell_size_x: f64,
-    cell_size_y: f64,
-) -> PyResult<Bound<'py, PyList>> {
-    let leg_cells = leg_cells.as_array();
-    let leg_shape = leg_cells.shape();
-    if leg_shape.len() != 2 || leg_shape[1] != 4 {
-        return Err(PyValueError::new_err(
-            "leg_cells must have shape (n, 4): source_row, source_col, destination_row, destination_col",
-        ));
-    }
-
-    let cost_surface = cost_surface.as_array();
-    let elevation = elevation.as_ref().map(|array| array.as_array());
-    let barriers = barriers.as_ref().map(|array| array.as_array());
-    let shape = cost_surface.shape();
-    let rows = shape[0];
-    let cols = shape[1];
-    if rows == 0 || cols == 0 {
-        return Err(PyValueError::new_err("input rasters must not be empty"));
-    }
-    if let Some(elevation) = &elevation {
-        if elevation.shape() != shape {
-            return Err(PyValueError::new_err(
-                "elevation must have the same shape as cost_surface",
-            ));
-        }
-    }
-    if let Some(barriers) = &barriers {
-        if barriers.shape() != shape {
-            return Err(PyValueError::new_err(
-                "barriers must have the same shape as cost_surface",
-            ));
-        }
-    }
-    if cell_size_x <= 0.0
-        || cell_size_y <= 0.0
-        || !cell_size_x.is_finite()
-        || !cell_size_y.is_finite()
-    {
-        return Err(PyValueError::new_err(
-            "cell sizes must be positive finite values",
-        ));
-    }
-
-    let mut legs = Vec::with_capacity(leg_shape[0]);
-    for leg_index in 0..leg_shape[0] {
-        let source_row = leg_cells[[leg_index, 0]];
-        let source_col = leg_cells[[leg_index, 1]];
-        let destination_row = leg_cells[[leg_index, 2]];
-        let destination_col = leg_cells[[leg_index, 3]];
-        for (row, col, name) in [
-            (source_row, source_col, "source"),
-            (destination_row, destination_col, "destination"),
-        ] {
-            if row < 0 || col < 0 || row >= rows as i64 || col >= cols as i64 {
-                return Err(PyValueError::new_err(format!(
-                    "{name} cell is outside the raster"
-                )));
-            }
-        }
-        legs.push((
-            source_row as usize * cols + source_col as usize,
-            destination_row as usize * cols + destination_col as usize,
-        ));
-    }
-
-    let vf = VerticalFactor::from_py_dict(vertical_factor)?;
-    let shared_input = shared_solver_input_from_arrays(
-        rows,
-        cols,
-        cost_surface,
-        elevation,
-        barriers,
-        vf,
-        cell_size_x,
-        cell_size_y,
-    );
-
-    let solved = py
-        .detach(|| solve_route_legs_parallel(shared_input, &legs))
-        .map_err(PyRuntimeError::new_err)?;
-
-    let output = PyList::empty(py);
-    for leg in solved {
-        let vertices = leg.line.len() / 2;
-        let dict = PyDict::new(py);
-        dict.set_item(
-            "line",
-            Array2::from_shape_vec((vertices, 2), leg.line)
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
-                .into_pyarray(py),
-        )?;
-        dict.set_item("cost", leg.cost)?;
-        dict.set_item("metadata", trace_metadata_dict(py, leg.metadata)?)?;
-        output.append(dict)?;
-    }
-    Ok(output)
-}
-
-#[pyfunction]
-#[allow(clippy::too_many_arguments)]
-fn route_legs_windowed<'py>(
-    py: Python<'py>,
     leg_windows: PyReadonlyArray2<'py, i64>,
     cost_surface: PyReadonlyArray2<'py, f64>,
     elevation: Option<PyReadonlyArray2<'py, f64>>,
@@ -394,7 +286,7 @@ fn route_legs_windowed<'py>(
     );
 
     let solved = py
-        .detach(|| solve_route_leg_windows_parallel(shared_input, &windows))
+        .detach(|| solve_route_legs_parallel(shared_input, &windows))
         .map_err(PyRuntimeError::new_err)?;
 
     let output = PyList::empty(py);
@@ -478,68 +370,6 @@ fn shared_solver_input_from_arrays(
 }
 
 fn solve_route_legs_parallel(
-    shared_input: SharedSolverInput,
-    legs: &[(usize, usize)],
-) -> Result<Vec<NativeRouteLeg>, String> {
-    legs.par_iter()
-        .map(|&(source, target)| solve_route_leg(shared_input.clone(), source, target))
-        .collect()
-}
-
-fn solve_route_leg(
-    shared_input: SharedSolverInput,
-    source: usize,
-    target: usize,
-) -> Result<NativeRouteLeg, String> {
-    let rows = shared_input.rows;
-    let cols = shared_input.cols;
-    let cell_size_x = shared_input.cell_size_x;
-    let cell_size_y = shared_input.cell_size_y;
-    let solver = Solver::from_shared(shared_input.clone());
-    let output = solver
-        .solve(&[source], Some(&[target]), None, 1)
-        .map_err(|err| err.to_string())?;
-    let target_cost = output.distance[target];
-    let parent_a: Vec<i64> = output.parent.iter().map(|parent| parent.a).collect();
-    let parent_b: Vec<i64> = output.parent.iter().map(|parent| parent.b).collect();
-    let parent_weight: Vec<f64> = output.parent.iter().map(|parent| parent.weight).collect();
-    let distance =
-        ArrayView2::from_shape((rows, cols), &output.distance).map_err(|err| err.to_string())?;
-    let back_direction = ArrayView2::from_shape((rows, cols), &output.back_direction)
-        .map_err(|err| err.to_string())?;
-    let parent_a =
-        ArrayView2::from_shape((rows, cols), &parent_a).map_err(|err| err.to_string())?;
-    let parent_b =
-        ArrayView2::from_shape((rows, cols), &parent_b).map_err(|err| err.to_string())?;
-    let parent_weight =
-        ArrayView2::from_shape((rows, cols), &parent_weight).map_err(|err| err.to_string())?;
-    let valid = ArrayView2::from_shape((rows, cols), shared_input.barriers.valid())
-        .map_err(|err| err.to_string())?;
-    let trace = trace_optimal_path(TraceRequest {
-        distance,
-        valid,
-        back_direction,
-        parent_a,
-        parent_b,
-        parent_weight,
-        destination_row: (target / cols) as isize,
-        destination_col: (target % cols) as isize,
-        cell_size_x,
-        cell_size_y,
-        origin_x: 0.0,
-        origin_y: 0.0,
-        max_steps: 0,
-    })
-    .map_err(path_trace_message)?;
-
-    Ok(NativeRouteLeg {
-        line: trace.coords,
-        cost: target_cost,
-        metadata: trace.metadata,
-    })
-}
-
-fn solve_route_leg_windows_parallel(
     shared_input: SharedSolverInput,
     windows: &[NativeRouteLegWindow],
 ) -> Result<Vec<NativeRouteLeg>, String> {
@@ -831,7 +661,6 @@ fn path_trace_message(err: PathTraceError) -> String {
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(distance_accumulation, m)?)?;
     m.add_function(wrap_pyfunction!(route_legs, m)?)?;
-    m.add_function(wrap_pyfunction!(route_legs_windowed, m)?)?;
     m.add_function(wrap_pyfunction!(optimal_path_as_line, m)?)?;
     m.add_function(wrap_pyfunction!(optimal_path_trace, m)?)?;
     Ok(())

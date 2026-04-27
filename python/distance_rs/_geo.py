@@ -39,7 +39,7 @@ from ._distance import (
     evaluate_path_cost as _evaluate_raster_path_cost,
 )
 from ._distance import (
-    route_legs_windowed as _route_legs_windowed,
+    route_legs as _route_legs,
 )
 
 Bounds = tuple[float, float, float, float]
@@ -454,7 +454,7 @@ def _route_path_parallel(
         )
         leg_endpoints.append((source_cell, destination_cell))
 
-    solved_legs = _route_legs_windowed(
+    solved_legs = _route_legs(
         geo.surface,
         np.asarray(leg_windows, dtype=np.int64),
         vertical_factor=vertical_factor,

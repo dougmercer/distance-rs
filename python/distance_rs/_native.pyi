@@ -19,15 +19,6 @@ def distance_accumulation(
     progress_interval: int,
 ) -> dict[str, Any]: ...
 def route_legs(
-    legs: npt.NDArray[np.int64],
-    cost: npt.NDArray[np.float64],
-    elevation: npt.NDArray[np.float64] | None,
-    barriers: npt.NDArray[np.bool_] | None,
-    vertical_factor: Mapping[str, float | str],
-    cell_size_x: float,
-    cell_size_y: float,
-) -> list[dict[str, Any]]: ...
-def route_legs_windowed(
     leg_windows: npt.NDArray[np.int64],
     cost: npt.NDArray[np.float64],
     elevation: npt.NDArray[np.float64] | None,
