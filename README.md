@@ -210,6 +210,23 @@ route.legs[0].metrics
 route.metrics
 ```
 
+For a quick terrain/land-use route figure, use the plotting helper instead of
+hand-writing raster windows, downsampling, legends, and overlay code:
+
+```python
+from distance_rs.plotting import plot_route_map
+
+plot_route_map(
+    "route.png",
+    CostRaster("land_use.tif", values={1: 1.0, 2: 1.8, 3: 4.0}),
+    elevation="elevation.tif",
+    waypoints=GeoPoints("waypoints.geojson"),
+    barriers=GeoBarriers("barriers.geojson"),
+    routes={"Ordered Upwind": route},
+    land_use_labels={1: "Trail", 2: "Meadow", 3: "Forest"},
+)
+```
+
 Raster paths infer CRS, transform, resolution, and bounds from the file unless
 overridden by `GridSpec`. Vector files infer CRS from file metadata; GeoJSON
 defaults to `EPSG:4326`. Plain coordinate lists and Shapely geometries must be

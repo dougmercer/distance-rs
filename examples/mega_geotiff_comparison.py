@@ -21,6 +21,10 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import rasterio
+from rasterio.transform import from_origin
+from rasterio.windows import Window
+from shapely.geometry import MultiPoint, Polygon
+
 from distance_rs import (
     CostRaster,
     GeoBarriers,
@@ -38,11 +42,8 @@ from distance_rs.baselines import (
     trace_raster_path,
     whitebox_cost_distance,
 )
-from rasterio.enums import Resampling
-from rasterio.transform import from_origin
-from rasterio.windows import Window, from_bounds
-from rasterio.windows import bounds as window_bounds
-from shapely.geometry import MultiPoint, Polygon
+from distance_rs.metrics import combine_path_metrics, path_metrics
+from distance_rs.plotting import plot_route_map
 
 CRS = "EPSG:32618"
 WEST = 500_000.0
@@ -531,16 +532,24 @@ def run_raster_dijkstra_route(
         cell_line = trace_raster_path(result.parent, destination_cell, cell_size=geo.grid.cell_size)
         path_xy = geo.grid.raster_line_to_xy(cell_line)[::-1].copy()
         metrics = path_metrics(
-            path_xy, cost=destination_cost, geo=geo, baseline_speed=baseline_speed
+            path_xy,
+            cost=destination_cost,
+            surface=geo,
+            vertical_factor=VERTICAL_FACTOR,
+            baseline_speed=baseline_speed,
         )
         reference_cost = evaluate_path_cost(geo, path_xy, vertical_factor=VERTICAL_FACTOR)
         reference_metrics = path_metrics(
-            path_xy, cost=reference_cost, geo=geo, baseline_speed=baseline_speed
+            path_xy,
+            cost=reference_cost,
+            surface=geo,
+            vertical_factor=VERTICAL_FACTOR,
+            baseline_speed=baseline_speed,
         )
         total_reference_metrics = (
             reference_metrics
             if total_reference_metrics is None
-            else combine_metrics(total_reference_metrics, reference_metrics)
+            else combine_path_metrics(total_reference_metrics, reference_metrics)
         )
         legs.append(
             ComparisonLeg(
@@ -616,12 +625,16 @@ def run_whitebox_route(
         if path_xy is not None and len(path_xy) > 0:
             reference_cost = evaluate_path_cost(geo, path_xy, vertical_factor=VERTICAL_FACTOR)
             reference_metrics = path_metrics(
-                path_xy, cost=reference_cost, geo=geo, baseline_speed=baseline_speed
+                path_xy,
+                cost=reference_cost,
+                surface=geo,
+                vertical_factor=VERTICAL_FACTOR,
+                baseline_speed=baseline_speed,
             )
             total_reference_metrics = (
                 reference_metrics
                 if total_reference_metrics is None
-                else combine_metrics(total_reference_metrics, reference_metrics)
+                else combine_path_metrics(total_reference_metrics, reference_metrics)
             )
         metrics = PathMetrics(
             cost=destination_cost,
@@ -688,84 +701,6 @@ def path_mask_to_xy(geo: GeoSurface, path_mask: npt.NDArray[np.bool_]) -> npt.ND
     return geo.grid.raster_line_to_xy(local_line)
 
 
-def path_metrics(
-    path_xy: npt.NDArray[np.float64],
-    *,
-    cost: float,
-    geo: GeoSurface,
-    baseline_speed: float,
-) -> PathMetrics:
-    distance_m = path_distance(path_xy)
-    surface_distance_m = path_surface_distance(path_xy, geo)
-    time_hours = cost / (baseline_speed * 1000.0)
-    average_speed_kmh = surface_distance_m / 1000.0 / time_hours if time_hours > 0.0 else math.inf
-    return PathMetrics(
-        cost=cost,
-        distance_m=distance_m,
-        surface_distance_m=surface_distance_m,
-        time_hours=time_hours,
-        average_speed_kmh=average_speed_kmh,
-    )
-
-
-def combine_metrics(first: PathMetrics, second: PathMetrics) -> PathMetrics:
-    cost = first.cost + second.cost
-    distance_m = first.distance_m + second.distance_m
-    surface_distance_m = first.surface_distance_m + second.surface_distance_m
-    time_hours = first.time_hours + second.time_hours
-    average_speed_kmh = surface_distance_m / 1000.0 / time_hours if time_hours > 0.0 else math.inf
-    return PathMetrics(
-        cost=cost,
-        distance_m=distance_m,
-        surface_distance_m=surface_distance_m,
-        time_hours=time_hours,
-        average_speed_kmh=average_speed_kmh,
-    )
-
-
-def path_distance(path_xy: npt.NDArray[np.float64]) -> float:
-    if len(path_xy) < 2:
-        return 0.0
-    delta = np.diff(path_xy, axis=0)
-    return float(np.hypot(delta[:, 0], delta[:, 1]).sum())
-
-
-def path_surface_distance(path_xy: npt.NDArray[np.float64], geo: GeoSurface) -> float:
-    plan_distances = segment_plan_distances(path_xy)
-    if geo.surface.elevation is None or plan_distances.size == 0:
-        return float(plan_distances.sum())
-    elevations = sample_elevation(path_xy, geo)
-    dz = np.diff(elevations)
-    finite = np.isfinite(dz)
-    surface = plan_distances.copy()
-    surface[finite] = np.hypot(plan_distances[finite], dz[finite])
-    return float(surface.sum())
-
-
-def segment_plan_distances(path_xy: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-    if len(path_xy) < 2:
-        return np.empty(0, dtype=np.float64)
-    delta = np.diff(path_xy, axis=0)
-    return np.hypot(delta[:, 0], delta[:, 1])
-
-
-def sample_elevation(path_xy: npt.NDArray[np.float64], geo: GeoSurface) -> npt.NDArray[np.float64]:
-    if geo.surface.elevation is None:
-        return np.full(len(path_xy), np.nan, dtype=np.float64)
-    rows, cols = rasterio.transform.rowcol(
-        geo.grid.transform,
-        path_xy[:, 0].tolist(),
-        path_xy[:, 1].tolist(),
-        op=math.floor,
-    )
-    height, width = geo.surface.elevation.shape
-    out = np.full(len(path_xy), np.nan, dtype=np.float64)
-    for point_index, (row, col) in enumerate(zip(rows, cols)):
-        if 0 <= row < height and 0 <= col < width:
-            out[point_index] = float(geo.surface.elevation[int(row), int(col)])
-    return out
-
-
 def plot_comparison(
     path: Path,
     *,
@@ -776,213 +711,23 @@ def plot_comparison(
     results: list[ComparisonRoute],
     max_plot_pixels: int,
 ) -> None:
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.colors import BoundaryNorm, LightSource, ListedColormap
-        from matplotlib.lines import Line2D
-        from matplotlib.patches import Patch
-    except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "matplotlib is required for plotting; run with `uv run --group plot "
-            "python examples/mega_geotiff_comparison.py`"
-        ) from exc
-
-    plot_bounds = route_plot_bounds(waypoints, barriers, results, margin=900.0)
-    land_use, elevation, extent = read_plot_rasters(
-        land_use_path,
-        elevation_path,
-        bounds=plot_bounds,
-        max_plot_pixels=max_plot_pixels,
-    )
-    fig, axes = plt.subplots(
-        1, 2, figsize=(15, 7), constrained_layout=True, sharex=True, sharey=True
-    )
-    terrain_ax, land_ax = axes
-    ls = LightSource(azdeg=315, altdeg=45)
-    terrain_ax.imshow(
-        ls.shade(elevation, cmap=plt.cm.terrain, blend_mode="overlay", vert_exag=0.55),
-        extent=extent,
-        origin="upper",
-        interpolation="bilinear",
-    )
-    terrain_ax.set_title("Terrain and Solver Routes")
-
-    land_cmap = ListedColormap(
-        ["#d9ead3", "#93c47d", "#c9b458", "#b6a05b", "#3f6f3a", "#8e8e86", "#5d9ca6"]
-    )
-    land_ax.imshow(
-        land_use,
-        cmap=land_cmap,
-        norm=BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5], land_cmap.N),
-        extent=extent,
-        origin="upper",
-        interpolation="nearest",
-    )
-    land_ax.set_title("Land Use and Burned Barriers")
-
-    colors = {
-        "ordered_upwind": "#d95f02",
-        "raster_dijkstra": "#1f78b4",
-        "whitebox_cost_distance": "#ffcc00",
+    successful_results = {
+        result.solver.replace("_", " ").title(): result
+        for result in results
+        if result.status == "ok"
     }
-    labels = {
-        "ordered_upwind": "Ordered Upwind",
-        "raster_dijkstra": "Raster Dijkstra",
-        "whitebox_cost_distance": "Whitebox CostDistance",
-    }
-    for ax in axes:
-        draw_barriers(ax, barriers)
-        draw_waypoints(ax, waypoints)
-        for result in results:
-            draw_result(ax, result, colors, labels)
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_xlabel("Easting (m)")
-        ax.set_ylabel("Northing (m)")
-
-    route_handles = [
-        Line2D([0], [0], color=colors["ordered_upwind"], lw=2.6, label=labels["ordered_upwind"]),
-        Line2D(
-            [0],
-            [0],
-            color=colors["raster_dijkstra"],
-            lw=2.1,
-            ls="--",
-            label=labels["raster_dijkstra"],
-        ),
-        Line2D(
-            [0],
-            [0],
-            color=colors["whitebox_cost_distance"],
-            lw=0,
-            marker=".",
-            markersize=10,
-            label=labels["whitebox_cost_distance"],
-        ),
-        Line2D([0], [0], marker="o", color="black", lw=0, label="Waypoint"),
-        Patch(facecolor="none", edgecolor="#111111", hatch="////", label="Barrier"),
-    ]
-    land_handles = [
-        Patch(facecolor=land_cmap(index - 1), edgecolor="none", label=label)
-        for index, label in LAND_USE_LABELS.items()
-    ]
-    terrain_ax.legend(handles=route_handles, loc="upper left")
-    land_ax.legend(handles=land_handles + route_handles[:3], loc="upper left", ncols=2)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-
-
-def draw_result(
-    ax: Any,
-    result: ComparisonRoute,
-    colors: dict[str, str],
-    labels: dict[str, str],
-) -> None:
-    if result.status != "ok":
-        return
-    color = colors[result.solver]
-    label = labels[result.solver]
-    if result.path_xy is not None:
-        linestyle = "--" if result.solver == "raster_dijkstra" else "-"
-        ax.plot(result.path_xy[:, 0], result.path_xy[:, 1], color=color, lw=2.3, ls=linestyle)
-    for leg in result.legs:
-        if leg.mask_xy is not None and len(leg.mask_xy) > 0:
-            ax.scatter(leg.mask_xy[:, 0], leg.mask_xy[:, 1], s=2.5, color=color, alpha=0.85)
-    if result.path_xy is not None and len(result.path_xy) > 0:
-        ax.plot([], [], color=color, label=label)
-
-
-def draw_waypoints(ax: Any, waypoints: list[tuple[float, float]]) -> None:
-    ax.scatter(
-        [point[0] for point in waypoints],
-        [point[1] for point in waypoints],
-        s=30,
-        c="black",
-        edgecolors="white",
-        linewidths=0.8,
-        zorder=6,
-    )
-
-
-def draw_barriers(ax: Any, barriers: list[Polygon]) -> None:
-    for barrier in barriers:
-        xs, ys = barrier.exterior.xy
-        ax.fill(xs, ys, facecolor="none", edgecolor="#111111", hatch="////", linewidth=1.0)
-
-
-def route_plot_bounds(
-    waypoints: list[tuple[float, float]],
-    barriers: list[Polygon],
-    results: list[ComparisonRoute],
-    *,
-    margin: float,
-) -> Bounds:
-    xs = [point[0] for point in waypoints]
-    ys = [point[1] for point in waypoints]
-    for barrier in barriers:
-        bx, by = barrier.exterior.xy
-        xs.extend(float(value) for value in bx)
-        ys.extend(float(value) for value in by)
-    for result in results:
-        if result.path_xy is not None and len(result.path_xy) > 0:
-            xs.extend(result.path_xy[:, 0].tolist())
-            ys.extend(result.path_xy[:, 1].tolist())
-        for leg in result.legs:
-            if leg.mask_xy is not None and len(leg.mask_xy) > 0:
-                xs.extend(leg.mask_xy[:, 0].tolist())
-                ys.extend(leg.mask_xy[:, 1].tolist())
-    return min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin
-
-
-def read_plot_rasters(
-    land_use_path: Path,
-    elevation_path: Path,
-    *,
-    bounds: Bounds,
-    max_plot_pixels: int,
-) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.float32], Bounds]:
-    with rasterio.open(land_use_path) as land_dataset:
-        window = clamped_window(land_dataset, bounds)
-        out_shape = plot_out_shape(window, max_plot_pixels)
-        land_use = land_dataset.read(
-            1,
-            window=window,
-            out_shape=out_shape,
-            resampling=Resampling.nearest,
-        )
-        extent_bounds = window_bounds(window, land_dataset.transform)
-    with rasterio.open(elevation_path) as elevation_dataset:
-        elevation = elevation_dataset.read(
-            1,
-            window=window,
-            out_shape=out_shape,
-            resampling=Resampling.bilinear,
-        )
-    left, bottom, right, top = extent_bounds
-    return land_use, elevation, (left, right, bottom, top)
-
-
-def clamped_window(dataset: Any, bounds: Bounds) -> Window:
-    left, bottom, right, top = bounds
-    raster_left, raster_bottom, raster_right, raster_top = dataset.bounds
-    left = max(left, raster_left)
-    right = min(right, raster_right)
-    bottom = max(bottom, raster_bottom)
-    top = min(top, raster_top)
-    window = from_bounds(left, bottom, right, top, transform=dataset.transform)
-    col_off = max(0, int(math.floor(window.col_off)))
-    row_off = max(0, int(math.floor(window.row_off)))
-    col_stop = min(dataset.width, int(math.ceil(window.col_off + window.width)))
-    row_stop = min(dataset.height, int(math.ceil(window.row_off + window.height)))
-    return Window(col_off, row_off, col_stop - col_off, row_stop - row_off)
-
-
-def plot_out_shape(window: Window, max_plot_pixels: int) -> tuple[int, int]:
-    cells = max(1.0, float(window.width * window.height))
-    stride = max(1, int(math.ceil(math.sqrt(cells / max_plot_pixels))))
-    return (
-        max(1, int(math.ceil(window.height / stride))),
-        max(1, int(math.ceil(window.width / stride))),
+    plot_route_map(
+        path,
+        CostRaster(land_use_path, values=LAND_USE_COSTS),
+        elevation=elevation_path,
+        waypoints=GeoPoints(waypoints, crs=CRS),
+        barriers=[GeoBarriers(barrier, crs=CRS) for barrier in barriers],
+        routes=successful_results,
+        grid=GridSpec(crs=CRS),
+        margin=900.0,
+        max_pixels=max_plot_pixels,
+        land_use_labels=LAND_USE_LABELS,
+        title="Terrain and Solver Routes",
     )
 
 

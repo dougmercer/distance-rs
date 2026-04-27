@@ -21,6 +21,7 @@ from distance_rs import (
     load_surface,
     route_path,
 )
+from distance_rs.metrics import path_metrics
 
 
 def _write_geotiff(
@@ -250,6 +251,75 @@ def test_route_path_stitches_waypoint_legs_and_metrics(tmp_path: Path) -> None:
     assert route.metrics.average_speed_kmh == pytest.approx(
         route.metrics.surface_distance_m / 1000.0 / route.metrics.time_hours
     )
+
+
+def test_path_metrics_helper_matches_route_leg_metrics(tmp_path: Path) -> None:
+    cost_path = tmp_path / "cost.tif"
+    _write_geotiff(
+        cost_path,
+        np.ones((30, 30), dtype=np.float32),
+        transform=from_origin(0.0, 300.0, 10.0, 10.0),
+        crs="EPSG:3857",
+    )
+
+    route = route_path(
+        cost_path,
+        GeoPoints([(5.0, 295.0), (245.0, 55.0)], crs="EPSG:3857"),
+        margin=40.0,
+        baseline_speed=5.0,
+    )
+    assert route.metrics is not None
+    geo = load_surface(cost_path)
+
+    measured = path_metrics(
+        route.path_xy,
+        cost=route.metrics.cost,
+        surface=geo,
+        baseline_speed=5.0,
+    )
+
+    assert measured.cost == pytest.approx(route.metrics.cost)
+    assert measured.distance_m == pytest.approx(route.metrics.distance_m)
+    assert measured.time_hours == pytest.approx(route.metrics.time_hours)
+
+
+def test_plot_route_map_writes_png_when_matplotlib_is_available(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    from distance_rs.plotting import plot_route_map
+
+    cost_path = tmp_path / "cost.tif"
+    elevation_path = tmp_path / "elevation.tif"
+    transform = from_origin(0.0, 100.0, 10.0, 10.0)
+    _write_geotiff(
+        cost_path,
+        np.ones((10, 10), dtype=np.float32),
+        transform=transform,
+        crs="EPSG:3857",
+    )
+    _write_geotiff(
+        elevation_path,
+        np.arange(100, dtype=np.float32).reshape(10, 10),
+        transform=transform,
+        crs="EPSG:3857",
+    )
+    route = route_path(
+        cost_path,
+        GeoPoints([(5.0, 95.0), (85.0, 15.0)], crs="EPSG:3857"),
+        margin=10.0,
+    )
+
+    output_path = tmp_path / "route.png"
+    plot_route_map(
+        output_path,
+        CostRaster(cost_path, values={1: 1.0}),
+        elevation=elevation_path,
+        waypoints=GeoPoints([(5.0, 95.0), (85.0, 15.0)], crs="EPSG:3857"),
+        routes={"Ordered Upwind": route},
+        land_use_labels={1: "Open"},
+    )
+
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
 
 
 def test_route_path_can_solve_legs_in_parallel_from_one_surface(tmp_path: Path) -> None:
