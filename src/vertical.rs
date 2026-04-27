@@ -150,14 +150,10 @@ impl VerticalFactor {
         let factor = match self.kind {
             VerticalFactorKind::None => 1.0,
             VerticalFactorKind::Binary => self.zero_factor,
-            VerticalFactorKind::Linear => self.zero_factor + self.slope_per_radian * slope.atan(),
-            VerticalFactorKind::InverseLinear => {
+            VerticalFactorKind::Linear | VerticalFactorKind::InverseLinear => {
                 self.zero_factor + self.slope_per_radian * slope.atan()
             }
-            VerticalFactorKind::SymmetricLinear => {
-                self.zero_factor + self.slope_per_radian * slope.atan().abs()
-            }
-            VerticalFactorKind::SymmetricInverseLinear => {
+            VerticalFactorKind::SymmetricLinear | VerticalFactorKind::SymmetricInverseLinear => {
                 self.zero_factor + self.slope_per_radian * slope.atan().abs()
             }
             VerticalFactorKind::Cos => cos_factor_from_slope(slope, self.power),
@@ -197,14 +193,10 @@ impl VerticalFactor {
         let factor = match self.kind {
             VerticalFactorKind::None => 1.0,
             VerticalFactorKind::Binary => self.zero_factor,
-            VerticalFactorKind::Linear => self.zero_factor + self.slope_per_radian * angle_radians,
-            VerticalFactorKind::InverseLinear => {
+            VerticalFactorKind::Linear | VerticalFactorKind::InverseLinear => {
                 self.zero_factor + self.slope_per_radian * angle_radians
             }
-            VerticalFactorKind::SymmetricLinear => {
-                self.zero_factor + self.slope_per_radian * angle_radians.abs()
-            }
-            VerticalFactorKind::SymmetricInverseLinear => {
+            VerticalFactorKind::SymmetricLinear | VerticalFactorKind::SymmetricInverseLinear => {
                 self.zero_factor + self.slope_per_radian * angle_radians.abs()
             }
             VerticalFactorKind::Cos => cos_factor(angle_radians, self.power),
