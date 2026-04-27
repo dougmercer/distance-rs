@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
@@ -16,35 +15,6 @@ pub(crate) const ACCEPTED: u8 = 2;
 const DISTANCE_EPS_ABS: f64 = 1.0e-12;
 const DISTANCE_EPS_REL: f64 = 1.0e-12;
 const HEAP_NO_POS: usize = usize::MAX;
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct HeapEntry {
-    pub(crate) value: f64,
-    pub(crate) idx: usize,
-}
-
-impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.idx == other.idx && self.value.total_cmp(&other.value) == Ordering::Equal
-    }
-}
-
-impl Eq for HeapEntry {}
-
-impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for HeapEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .value
-            .total_cmp(&self.value)
-            .then_with(|| other.idx.cmp(&self.idx))
-    }
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct IndexedMinHeap {
@@ -76,13 +46,12 @@ impl IndexedMinHeap {
         }
     }
 
-    pub(crate) fn pop(&mut self) -> Option<HeapEntry> {
+    pub(crate) fn pop(&mut self) -> Option<usize> {
         if self.heap.is_empty() {
             return None;
         }
 
         let min_idx = self.heap[0];
-        let min_value = self.values[min_idx];
         let last = self.heap.pop().expect("heap is not empty");
         self.positions[min_idx] = HEAP_NO_POS;
         self.values[min_idx] = f64::INFINITY;
@@ -93,10 +62,7 @@ impl IndexedMinHeap {
             self.sift_down(0);
         }
 
-        Some(HeapEntry {
-            value: min_value,
-            idx: min_idx,
-        })
+        Some(min_idx)
     }
 
     fn sift_up(&mut self, mut position: usize) {
@@ -375,21 +341,21 @@ impl Solver {
             self.update_around_full(idx);
         }
 
-        while let Some(entry) = self.heap.pop() {
-            if self.state[entry.idx] == ACCEPTED {
+        while let Some(idx) = self.heap.pop() {
+            if self.state[idx] == ACCEPTED {
                 continue;
             }
 
-            self.state[entry.idx] = ACCEPTED;
+            self.state[idx] = ACCEPTED;
             progress.increment()?;
-            if !target_mask.is_empty() && target_mask[entry.idx] {
-                target_mask[entry.idx] = false;
+            if !target_mask.is_empty() && target_mask[idx] {
+                target_mask[idx] = false;
                 remaining_targets -= 1;
                 if remaining_targets == 0 {
                     break;
                 }
             }
-            self.update_around_incremental(entry.idx);
+            self.update_around_incremental(idx);
         }
 
         progress.finish()?;
@@ -528,9 +494,9 @@ mod tests {
         heap.push_or_decrease(1, 1.0);
         heap.push_or_decrease(2, 1.0);
 
-        assert_eq!(heap.pop().unwrap().idx, 1);
-        assert_eq!(heap.pop().unwrap().idx, 2);
-        assert_eq!(heap.pop().unwrap().idx, 0);
+        assert_eq!(heap.pop().unwrap(), 1);
+        assert_eq!(heap.pop().unwrap(), 2);
+        assert_eq!(heap.pop().unwrap(), 0);
     }
 
     #[test]
@@ -540,10 +506,8 @@ mod tests {
         heap.push_or_decrease(1, 4.0);
         heap.push_or_decrease(0, 3.0);
 
-        let first = heap.pop().unwrap();
-        assert_eq!(first.idx, 0);
-        assert_eq!(first.value, 3.0);
-        assert_eq!(heap.pop().unwrap().idx, 1);
+        assert_eq!(heap.pop().unwrap(), 0);
+        assert_eq!(heap.pop().unwrap(), 1);
         assert!(heap.pop().is_none());
     }
 
