@@ -1,5 +1,5 @@
 use ndarray::{Array2, ArrayView2};
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyReadonlyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
@@ -531,48 +531,6 @@ fn trace_metadata_dict(py: Python<'_>, metadata: TraceMetadata) -> PyResult<Boun
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-fn optimal_path_as_line<'py>(
-    py: Python<'py>,
-    distance: PyReadonlyArray2<'py, f64>,
-    valid: PyReadonlyArray2<'py, bool>,
-    back_direction: PyReadonlyArray2<'py, f64>,
-    parent_a: PyReadonlyArray2<'py, i64>,
-    parent_b: PyReadonlyArray2<'py, i64>,
-    parent_weight: PyReadonlyArray2<'py, f64>,
-    destination_row: isize,
-    destination_col: isize,
-    cell_size_x: f64,
-    cell_size_y: f64,
-    origin_x: f64,
-    origin_y: f64,
-    max_steps: usize,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let output = trace_optimal_path(TraceRequest {
-        distance: distance.as_array(),
-        valid: valid.as_array(),
-        back_direction: back_direction.as_array(),
-        parent_a: parent_a.as_array(),
-        parent_b: parent_b.as_array(),
-        parent_weight: parent_weight.as_array(),
-        destination_row,
-        destination_col,
-        cell_size_x,
-        cell_size_y,
-        origin_x,
-        origin_y,
-        max_steps,
-    })
-    .map_err(path_trace_py_error)?;
-
-    let coords = output.coords;
-    let vertices = coords.len() / 2;
-    Ok(Array2::from_shape_vec((vertices, 2), coords)
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
-        .into_pyarray(py))
-}
-
-#[pyfunction]
-#[allow(clippy::too_many_arguments)]
 fn optimal_path_trace<'py>(
     py: Python<'py>,
     distance: PyReadonlyArray2<'py, f64>,
@@ -661,7 +619,6 @@ fn path_trace_message(err: PathTraceError) -> String {
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(distance_accumulation, m)?)?;
     m.add_function(wrap_pyfunction!(route_legs, m)?)?;
-    m.add_function(wrap_pyfunction!(optimal_path_as_line, m)?)?;
     m.add_function(wrap_pyfunction!(optimal_path_trace, m)?)?;
     Ok(())
 }

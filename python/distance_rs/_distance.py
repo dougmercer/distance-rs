@@ -925,23 +925,10 @@ def optimal_path_as_line(
         raise TypeError("result must be a DistanceAccumulationResult")
 
     if _is_one_destination(destination):
-        row, col = destination
-        max_steps_value = _normalize_max_steps(max_steps)
-        return _native.optimal_path_as_line(
-            result.distance,
-            result._valid,
-            result._back_direction,
-            result._parent_a,
-            result._parent_b,
-            result._parent_weight,
-            int(row),
-            int(col),
-            result.cell_size[0],
-            result.cell_size[1],
-            result.origin[0],
-            result.origin[1],
-            max_steps_value,
-        )
+        trace = optimal_path_trace(result, destination, max_steps=max_steps)
+        if isinstance(trace, list):
+            raise RuntimeError("single destination unexpectedly produced multiple paths")
+        return trace.line
 
     destinations = cast(Sequence[Cell], destination)
     return [

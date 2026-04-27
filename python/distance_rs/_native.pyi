@@ -27,21 +27,6 @@ def route_legs(
     cell_size_x: float,
     cell_size_y: float,
 ) -> list[dict[str, Any]]: ...
-def optimal_path_as_line(
-    distance: npt.NDArray[np.float64],
-    valid: npt.NDArray[np.bool_],
-    back_direction: npt.NDArray[np.float64],
-    parent_a: npt.NDArray[np.int64],
-    parent_b: npt.NDArray[np.int64],
-    parent_weight: npt.NDArray[np.float64],
-    row: int,
-    col: int,
-    cell_size_x: float,
-    cell_size_y: float,
-    origin_x: float,
-    origin_y: float,
-    max_steps: int,
-) -> npt.NDArray[np.float64]: ...
 def optimal_path_trace(
     distance: npt.NDArray[np.float64],
     valid: npt.NDArray[np.bool_],
