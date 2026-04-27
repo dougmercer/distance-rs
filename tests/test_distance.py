@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 import pytest
+
 from distance_rs import (
     RasterGrid,
     RasterSurface,

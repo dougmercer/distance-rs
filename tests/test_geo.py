@@ -7,6 +7,10 @@ import fiona
 import numpy as np
 import pytest
 import rasterio
+from rasterio.transform import from_origin
+from rasterio.warp import transform as transform_coords
+from shapely.geometry import LineString, Polygon
+
 from distance_rs import (
     CostRaster,
     GeoBarriers,
@@ -17,9 +21,6 @@ from distance_rs import (
     load_surface,
     route_path,
 )
-from rasterio.transform import from_origin
-from rasterio.warp import transform as transform_coords
-from shapely.geometry import LineString, Polygon
 
 
 def _write_geotiff(
