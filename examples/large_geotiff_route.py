@@ -1069,8 +1069,8 @@ def plot_route_map(
         Patch(facecolor=land_cmap(index - 1), edgecolor="none", label=label)
         for index, label in LAND_USE_LABELS.items()
     ]
-    terrain_ax.legend(handles=route_handles, loc="upper left")
-    land_ax.legend(handles=land_handles + route_handles[:3], loc="upper left", ncols=2)
+    terrain_ax.legend(handles=route_handles, loc="lower right")
+    land_ax.legend(handles=land_handles + route_handles[:3], loc="lower right", ncols=2)
 
     ordered_metrics = ordered_route.metrics
     if ordered_metrics is not None:
