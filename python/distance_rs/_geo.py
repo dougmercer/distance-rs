@@ -385,9 +385,7 @@ def route_path(
             else None
         )
         if metrics is not None:
-            total_metrics = (
-                metrics if total_metrics is None else _combine_metrics(total_metrics, metrics)
-            )
+            total_metrics = metrics if total_metrics is None else _combine_metrics(total_metrics, metrics)
 
         legs.append(
             OptimalPathLeg(
@@ -479,9 +477,7 @@ def _route_path_parallel(
             else None
         )
         if metrics is not None:
-            total_metrics = (
-                metrics if total_metrics is None else _combine_metrics(total_metrics, metrics)
-            )
+            total_metrics = metrics if total_metrics is None else _combine_metrics(total_metrics, metrics)
 
         legs.append(
             OptimalPathLeg(
@@ -741,9 +737,7 @@ def _average_speed_kmh(distance_m: float, time_hours: float) -> float:
     return 0.0 if distance_m == 0.0 else math.inf
 
 
-def _target_resolution(
-    dataset: Any, resolution: float | tuple[float, float] | None
-) -> tuple[float, float]:
+def _target_resolution(dataset: Any, resolution: float | tuple[float, float] | None) -> tuple[float, float]:
     if resolution is None:
         x_res, y_res = dataset.res
         return abs(float(x_res)), abs(float(y_res))
@@ -1016,9 +1010,7 @@ def _load_geometries(
         geometries = _geometries_from_geometry(value)
     elif isinstance(value, BaseGeometry) or hasattr(value, "__geo_interface__"):
         if source_crs is None:
-            raise ValueError(
-                "geometry barriers without file metadata require GeoBarriers(..., crs=...)"
-            )
+            raise ValueError("geometry barriers without file metadata require GeoBarriers(..., crs=...)")
         geometries = [_geometry_mapping(value.__geo_interface__)]
         geometry_crs = source_crs
     elif _is_sequence_of_inputs(value):
@@ -1042,10 +1034,7 @@ def _load_geometries(
     resolved_source_crs = CRS.from_user_input(geometry_crs)
     if resolved_source_crs == target_crs:
         return geometries
-    return [
-        _geometry_mapping(transform_geom(resolved_source_crs, target_crs, geometry))
-        for geometry in geometries
-    ]
+    return [_geometry_mapping(transform_geom(resolved_source_crs, target_crs, geometry)) for geometry in geometries]
 
 
 def _load_point_xy(points: Any, *, target_crs: Any) -> list[XY]:
@@ -1107,9 +1096,7 @@ def _geojson_crs(data: Mapping[str, Any]) -> Any | None:
     return None
 
 
-def _read_vector_file(
-    path: Path, *, layer: str | int | None
-) -> tuple[list[Mapping[str, Any]], Any]:
+def _read_vector_file(path: Path, *, layer: str | int | None) -> tuple[list[Mapping[str, Any]], Any]:
     if layer is None:
         collection_context = fiona.open(path)
     else:

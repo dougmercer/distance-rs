@@ -127,28 +127,18 @@ def raster_dijkstra(
     rows, cols = source_arr.shape
 
     cost = (
-        np.ones((rows, cols), dtype=np.float64)
-        if cost_surface is None
-        else np.asarray(cost_surface, dtype=np.float64)
+        np.ones((rows, cols), dtype=np.float64) if cost_surface is None else np.asarray(cost_surface, dtype=np.float64)
     )
     if cost.shape != source_arr.shape:
         raise ValueError("cost_surface must match sources shape")
     cost = np.maximum(cost, MIN_COST)
 
     has_elevation = elevation is not None
-    elev = (
-        np.zeros((rows, cols), dtype=np.float64)
-        if elevation is None
-        else np.asarray(elevation, dtype=np.float64)
-    )
+    elev = np.zeros((rows, cols), dtype=np.float64) if elevation is None else np.asarray(elevation, dtype=np.float64)
     if elev.shape != source_arr.shape:
         raise ValueError("elevation must match sources shape")
 
-    blocked = (
-        np.zeros((rows, cols), dtype=bool)
-        if barriers is None
-        else np.asarray(barriers, dtype=bool).copy()
-    )
+    blocked = np.zeros((rows, cols), dtype=bool) if barriers is None else np.asarray(barriers, dtype=bool).copy()
     if blocked.shape != source_arr.shape:
         raise ValueError("barriers must match sources shape")
 
@@ -562,18 +552,12 @@ def whitebox_cost_distance(
     rows, cols = source_arr.shape
 
     cost = (
-        np.ones((rows, cols), dtype=np.float64)
-        if cost_surface is None
-        else np.asarray(cost_surface, dtype=np.float64)
+        np.ones((rows, cols), dtype=np.float64) if cost_surface is None else np.asarray(cost_surface, dtype=np.float64)
     )
     if cost.shape != source_arr.shape:
         raise ValueError("cost_surface must match sources shape")
 
-    blocked = (
-        np.zeros((rows, cols), dtype=bool)
-        if barriers is None
-        else np.asarray(barriers, dtype=bool).copy()
-    )
+    blocked = np.zeros((rows, cols), dtype=bool) if barriers is None else np.asarray(barriers, dtype=bool).copy()
     if blocked.shape != source_arr.shape:
         raise ValueError("barriers must match sources shape")
 
@@ -676,9 +660,7 @@ def read_whitebox_raster(path: Path, *, nodata_as_inf: bool = False) -> npt.NDAr
     data = np.fromfile(path.with_suffix(".tas"), dtype=dtype)
     expected_size = rows * cols
     if data.size != expected_size:
-        raise RuntimeError(
-            f"Whitebox raster {path} has {data.size} cells, expected {expected_size}"
-        )
+        raise RuntimeError(f"Whitebox raster {path} has {data.size} cells, expected {expected_size}")
     out = data.reshape((rows, cols)).astype(np.float64)
     if nodata_as_inf:
         out[out == nodata] = np.inf

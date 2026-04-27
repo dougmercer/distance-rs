@@ -251,11 +251,7 @@ class VerticalFactor:
         vf = cast(_ResolvedVerticalFactor, self if self._is_resolved() else self.normalized())
         if vf.type == "none":
             return 1.0
-        if (
-            not math.isfinite(angle_degrees)
-            or angle_degrees <= vf.low_cut_angle
-            or angle_degrees >= vf.high_cut_angle
-        ):
+        if not math.isfinite(angle_degrees) or angle_degrees <= vf.low_cut_angle or angle_degrees >= vf.high_cut_angle:
             return math.inf
 
         if vf.type == "binary":
@@ -290,9 +286,7 @@ class VerticalFactor:
         return value if math.isfinite(value) and value > 0.0 else math.inf
 
     def _is_resolved(self) -> bool:
-        return self.type in _DEFAULTS and all(
-            getattr(self, name) is not None for name in _VERTICAL_FACTOR_OPTION_NAMES
-        )
+        return self.type in _DEFAULTS and all(getattr(self, name) is not None for name in _VERTICAL_FACTOR_OPTION_NAMES)
 
 
 def _hiking_pace(angle_degrees: float) -> float:
@@ -701,12 +695,7 @@ def _normalize_leg_windows(
     for row_index, col_index in ((0, 1), (2, 3)):
         row = windows[:, row_index]
         col = windows[:, col_index]
-        if (
-            np.any(row < row_min)
-            or np.any(row >= row_max)
-            or np.any(col < col_min)
-            or np.any(col >= col_max)
-        ):
+        if np.any(row < row_min) or np.any(row >= row_max) or np.any(col < col_min) or np.any(col >= col_max):
             raise ValueError("route leg endpoint is outside its window")
     return windows
 
@@ -733,12 +722,7 @@ def _normalize_cells(
     cells = np.ascontiguousarray(rounded.astype(np.int64))
 
     rows, cols = shape
-    if (
-        np.any(cells[:, 0] < 0)
-        or np.any(cells[:, 1] < 0)
-        or np.any(cells[:, 0] >= rows)
-        or np.any(cells[:, 1] >= cols)
-    ):
+    if np.any(cells[:, 0] < 0) or np.any(cells[:, 1] < 0) or np.any(cells[:, 0] >= rows) or np.any(cells[:, 1] >= cols):
         raise ValueError(f"{name} cell is outside the raster")
     return cells
 
@@ -931,10 +915,7 @@ def optimal_path_as_line(
         return trace.line
 
     destinations = cast(Sequence[Cell], destination)
-    return [
-        optimal_path_as_line(result, one_destination, max_steps=max_steps)
-        for one_destination in destinations
-    ]
+    return [optimal_path_as_line(result, one_destination, max_steps=max_steps) for one_destination in destinations]
 
 
 @overload
@@ -1000,10 +981,7 @@ def optimal_path_trace(
         )
 
     destinations = cast(Sequence[Cell], destination)
-    return [
-        optimal_path_trace(result, one_destination, max_steps=max_steps)
-        for one_destination in destinations
-    ]
+    return [optimal_path_trace(result, one_destination, max_steps=max_steps) for one_destination in destinations]
 
 
 def _normalize_cell_size(cell_size: float | tuple[float, float]) -> tuple[float, float]:
