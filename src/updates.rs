@@ -355,7 +355,7 @@ impl<'a> SegmentContext<'a> {
         let db = self.distance_b - value_idx;
         let grad_x = (da * bp_y - ap_y * db) / det;
         let grad_y = (ap_x * db - da * bp_x) / det;
-        Solver::direction_from_delta(-grad_x, -grad_y)
+        direction_from_delta(-grad_x, -grad_y)
     }
 
     fn parent_back_direction(&self, weight_a: f64) -> Option<f64> {
@@ -823,10 +823,6 @@ impl Solver {
         let (row, col) = self.row_col(idx);
         let dx = (target_col - col as f64) * self.grid.cell_size_x;
         let dy = (target_row - row as f64) * self.grid.cell_size_y;
-        Self::direction_from_delta(dx, dy)
-    }
-
-    fn direction_from_delta(dx: f64, dy: f64) -> Option<f64> {
         direction_from_delta(dx, dy)
     }
 }
