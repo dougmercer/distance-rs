@@ -263,6 +263,20 @@ The synthetic route includes irregular closure polygons, wetland/talus/forest
 land-use classes, and a vertical-factor cutoff that makes steep ridge faces
 impassable.
 
+For real GIS inputs, `examples/real_example.py` accepts land-use/elevation
+GeoTIFFs plus waypoint/barrier GeoJSON files, runs ordered upwind, raster
+Dijkstra, and Whitebox CostDistance, then writes a PNG, route GeoJSON, and JSON
+summary:
+
+```bash
+uv run --group plot --group whitebox python examples/real_example.py \
+  --land-use data/land_use.tif \
+  --elevation data/elevation.tif \
+  --waypoints data/waypoints.geojson \
+  --barriers data/barriers.geojson \
+  --costs '{"1": 0.7, "2": 1.0, "3": 2.2}'
+```
+
 ## Python Example
 
 ```python
